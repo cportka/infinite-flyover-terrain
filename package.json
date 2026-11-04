@@ -1,0 +1,22 @@
+{
+  "name": "infinite-flyover-terrain",
+  "private": true,
+  "version": "1.0.0",
+  "description": "An endless procedural flyover game rendered with three.js and custom shaders.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test \"tests/**/*.test.js\""
+  },
+  "dependencies": {
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "vite": "8.3.4"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
+}

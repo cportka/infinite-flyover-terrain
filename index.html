@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Infinite Flyover</title>
+    <meta name="description" content="An endless procedural flyover game: glide forever through ever-changing low-poly lands, thread light rings and chase the horizon." />
+    <meta name="theme-color" content="#0b0e1a" />
+    <meta property="og:title" content="Infinite Flyover" />
+    <meta property="og:description" content="Glide forever through an endless, procedurally generated world." />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://cportka.github.io/infinite-flyover-terrain/og.jpg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@1,400;1,500&family=Outfit:wght@200;300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <canvas id="scene" aria-label="Infinite procedural terrain flyover"></canvas>
+
+    <div id="ui">
+      <div id="loading" class="screen">
+        <div class="loading-inner">
+          <div class="brand">Infinite Flyover</div>
+          <div class="bar"><span id="load-bar"></span></div>
+          <div class="hint" id="load-hint">Raising mountains…</div>
+        </div>
+      </div>
+
+      <div id="title" class="screen hidden">
+        <div class="title-wrap">
+          <div class="eyebrow">An endless procedural journey</div>
+          <h1 class="wordmark"><span>Infinite</span><span>Flyover</span></h1>
+          <p class="lede">Glide forever through lands that never repeat. Thread rings of light, chain combos, and chase the horizon through day and night.</p>
+          <div class="actions">
+            <button id="btn-play" class="btn primary" type="button">Take flight</button>
+            <button id="btn-zen" class="btn ghost" type="button">Zen mode</button>
+          </div>
+          <div class="keys">
+            <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / drag <span>steer</span></div>
+            <div><kbd>Space</kbd> <span>boost</span></div>
+            <div><kbd>C</kbd> <span>camera</span></div>
+            <div><kbd>P</kbd> <span>pause</span></div>
+          </div>
+          <div class="best" id="best-line"></div>
+        </div>
+      </div>
+
+      <div id="hud" class="hidden">
+        <div class="hud-tl">
+          <div class="score-label">Score</div>
+          <div class="score" id="hud-score">0</div>
+          <div class="combo" id="hud-combo"><span>×</span><b id="hud-combo-n">1</b></div>
+        </div>
+        <div class="hud-tr">
+          <div class="stat"><span class="stat-label">Distance</span><span class="stat-val" id="hud-dist">0.0 km</span></div>
+          <div class="stat"><span class="stat-label" id="hud-clock-icon">☀</span><span class="stat-val" id="hud-clock">17:00</span></div>
+          <div class="buttons">
+            <button class="icon-btn" id="btn-sound" type="button" aria-label="Toggle sound" title="Sound (M)">♪</button>
+            <button class="icon-btn" id="btn-pause" type="button" aria-label="Pause" title="Pause (P)">❚❚</button>
+          </div>
+        </div>
+        <div class="hud-bottom">
+          <div class="boost-wrap">
+            <div class="boost-label">Boost</div>
+            <div class="boost-bar"><span id="hud-boost"></span></div>
+          </div>
+        </div>
+        <div id="region-toast" aria-live="polite">
+          <div class="region-line"></div>
+          <div class="region-name" id="region-name"></div>
+          <div class="region-tag" id="region-tag"></div>
+        </div>
+        <div id="popups"></div>
+        <div id="autopilot-badge">Autopilot · steer to take over</div>
+        <div id="zen-exit" class="hidden"><button class="btn ghost small" id="btn-zen-exit" type="button">Exit zen</button></div>
+      </div>
+
+      <div id="pause" class="screen hidden">
+        <div class="panel">
+          <h2>Paused</h2>
+          <div class="setting">
+            <label for="opt-quality">Quality</label>
+            <select id="opt-quality">
+              <option value="auto">Auto</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+          <div class="setting">
+            <label for="opt-camera">Camera</label>
+            <select id="opt-camera">
+              <option value="chase">Chase</option>
+              <option value="cinematic">Cinematic</option>
+              <option value="cockpit">Cockpit</option>
+            </select>
+          </div>
+          <div class="setting">
+            <label for="opt-time">Day cycle</label>
+            <select id="opt-time">
+              <option value="1">Normal</option>
+              <option value="0.4">Slow</option>
+              <option value="0">Frozen</option>
+              <option value="4">Fast</option>
+            </select>
+          </div>
+          <div class="setting">
+            <label for="opt-volume">Volume</label>
+            <input id="opt-volume" type="range" min="0" max="1" step="0.05" value="0.8" />
+          </div>
+          <div class="setting">
+            <label for="opt-invert">Invert vertical</label>
+            <input id="opt-invert" type="checkbox" />
+          </div>
+          <div class="seed-line">World seed <b id="seed-val"></b></div>
+          <div class="actions">
+            <button id="btn-resume" class="btn primary" type="button">Resume</button>
+            <button id="btn-newworld" class="btn ghost" type="button">New world</button>
+            <button id="btn-menu" class="btn ghost" type="button">Title</button>
+          </div>
+        </div>
+      </div>
+
+      <button id="boost-btn" type="button" aria-label="Boost">Boost</button>
+
+      <div id="error" class="screen hidden">
+        <div class="panel">
+          <h2>Can't start the flight</h2>
+          <p id="error-msg">This experience needs WebGL 2. Try a recent version of Chrome, Edge, Firefox or Safari.</p>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
