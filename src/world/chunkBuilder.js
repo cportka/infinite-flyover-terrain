@@ -75,8 +75,8 @@ const C = {
     rock2: hex(0x2c2b32), shore: hex(0x4a3c3c), bed: hex(0x1a1014), frost: hex(0x8a8a9a),
   },
   prism: {
-    pearl: hex(0xece8f4), lilac: hex(0xcdbfee), mint: hex(0xc4f2e4), blush: hex(0xf6d0e6), rock: hex(0xb8b0d0),
-    shore: hex(0xfaf6ff), bed: hex(0x9a90c0),
+    pearl: hex(0xa9a2c6), lilac: hex(0x9a84d8), mint: hex(0x7ccab6), blush: hex(0xd08cba), rock: hex(0x857ba6),
+    shore: hex(0xd6cdee), bed: hex(0x665c8c),
   },
   border: { ash: hex(0x2c2733), ash2: hex(0x4a4058), crack: hex(0xa04aff) },
 };
@@ -1398,8 +1398,8 @@ function placeSpecials(ctx, buf) {
     const y = ground + 70 + r6 * 90;
     const proto = islandProto(radius, mulberry32(hashInt(cx, cz, 0x15)));
     const inst = instBase(lx, y, lz, r7);
-    const grass = biome === BIOME.MYSTIC ? hex(0x7a52c8) : biome === BIOME.PRISM ? hex(0xece8f4) : hex(0x4b3f52);
-    const rockC = biome === BIOME.MYSTIC ? hex(0x4a4066) : biome === BIOME.PRISM ? hex(0xc8c0e0) : hex(0x2e2b33);
+    const grass = biome === BIOME.MYSTIC ? hex(0x7a52c8) : biome === BIOME.PRISM ? hex(0xa9a2c6) : hex(0x4b3f52);
+    const rockC = biome === BIOME.MYSTIC ? hex(0x4a4066) : biome === BIOME.PRISM ? hex(0x857ba6) : hex(0x2e2b33);
     inst.colors = [rockC, grass];
     emit(buf, proto, inst);
     colS(buf, lx, y - radius * 0.25, lz, radius, MAT.STONE);

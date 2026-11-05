@@ -588,8 +588,9 @@ export class Flyer {
         lookAhead = 10;
       }
       if (!this.alive) {
-        dist = 30;
-        height = 9;
+        // pull back to watch the end from a respectful distance
+        dist = 46;
+        height = 13;
       }
       const desired = fwdFlat.clone().multiplyScalar(-dist);
       desired.y += height;

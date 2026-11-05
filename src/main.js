@@ -403,7 +403,7 @@ const events = {
     finishRun();
     hud.eulogy(MATTER[mat].line, `flight ${game.crashes} · ${Math.round(game.score).toLocaleString()} points`);
     game.timeScale = 0.25;
-    post.final.uniforms.uFlash.value = 0.6;
+    post.final.uniforms.uFlash.value = 0.35;
     game.combo = 1;
   },
   onRespawn() {
@@ -627,8 +627,10 @@ function frame(now) {
   f.uDream.value = st.dream;
   f.uAberration.value = flyer.boosting ? 0.0045 : 0.0008 + st.dream * 0.0022;
   f.uFlash.value = Math.max(0, f.uFlash.value - dt * 0.8);
-  post.bloom.threshold = 2.6 + (1.15 - 2.6) * Math.max(st.night, st.dream * 0.7);
-  post.bloom.strength = 0.42 + 0.45 * st.dream;
+  // the dream blooms hardest at night; by day it must not wash the land out
+  const dreamBloom = st.dream * (0.35 + 0.65 * st.night);
+  post.bloom.threshold = 2.6 + (1.15 - 2.6) * Math.max(st.night, dreamBloom * 0.7);
+  post.bloom.strength = 0.42 + 0.45 * dreamBloom;
   post.render(dt);
 
   if (debug && Math.floor(now / 1000) !== Math.floor((now - rawMs) / 1000)) {

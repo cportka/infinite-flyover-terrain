@@ -29,7 +29,7 @@ const RECIPES = {
   earth: { flash: 0xffb070, fire: true, shock: 0xffd8a0, layers: [L.dust([0x6b5a3e, 0x8a7a5a]), L.sparks([0xffa040, 0xffd070])] },
   wood: { flash: 0xff9a40, fire: true, shock: 0xffc080, layers: [L.leaves([0x4f8a32, 0x8cbc4a, 0xe08a2a, 0xc0352a]), L.sparks([0xff9a40, 0xffe080], 80), L.smoke([0x3a3430], 30)] },
   stone: { flash: 0xffe0b0, fire: false, shock: 0xffffff, layers: [L.dust([0x8a8680, 0x6e6a62, 0xa49e92], 110), L.sparks([0xffe8c0, 0xffffff], 50)] },
-  crystal: { flash: 0xc070ff, fire: false, shock: 0x9ff0ff, layers: [L.glints([0xb070ff, 0x6ff0ff, 0xff70e0, 0xffffff]), L.spores([0x9ff0ff, 0xff9af0], 80)] },
+  crystal: { flash: 0xb060ff, fire: false, shock: 0x6ff0ff, layers: [L.glints([0xa050ff, 0x40e8ff, 0xff50d8, 0x6a7aff, 0x50ffb0]), L.spores([0x40e8ff, 0xff4ae8, 0xb070ff], 90)] },
   spores: { flash: 0x7affd0, fire: false, shock: 0xff7af0, layers: [L.spores([0x6ff6ff, 0xff7af0, 0xb48cff, 0x8affc8], 320), L.mist([0x8a6ab0], 40)] },
   fire: { flash: 0xff8a30, fire: true, shock: 0xffc080, layers: [L.embers([0xff7a2a, 0xffc04a, 0xff4a1a], 150), L.smoke([0x2a2420, 0x4a403a], 60), L.sparks([0xffe0a0], 50)] },
   obsidian: { flash: 0xff6a1e, fire: true, shock: 0xff6a1e, layers: [L.glints([0x8a4aff, 0xff6a1e, 0x2a2430], 170), L.embers([0xff7a2a, 0xffc04a], 90)] },
@@ -160,7 +160,7 @@ uniform float uT;
 varying vec2 vUv;
 void main() {
   float a = (1.0 - uT) * (1.0 - uT);
-  gl_FragColor = vec4(uColor * 2.5 * a, a);
+  gl_FragColor = vec4(uColor * 1.5 * a, a);
 }
 `;
 const shockVert = /* glsl */ `
@@ -223,7 +223,7 @@ export class Explosions {
       par[i * 4 + 2] = layer.gravity;
       par[i * 4 + 3] = layer.drag;
       const c = cols[Math.floor(this.rng() * cols.length)];
-      const gain = layer.add ? 2.4 : 1;
+      const gain = layer.add ? 1.6 : 1;
       col[i * 3] = c.r * gain;
       col[i * 3 + 1] = c.g * gain;
       col[i * 3 + 2] = c.b * gain;
@@ -374,7 +374,7 @@ export class Explosions {
       fire = new THREE.Mesh(
         this.sphere,
         new THREE.ShaderMaterial({
-          uniforms: { uT: { value: 0 }, uColA: { value: new THREE.Color(6, 4.2, 2.2) }, uColB: { value: new THREE.Color(2.2, 0.5, 0.08) } },
+          uniforms: { uT: { value: 0 }, uColA: { value: new THREE.Color(3.6, 1.9, 0.6) }, uColB: { value: new THREE.Color(1.5, 0.32, 0.05) } },
           vertexShader: fireVert,
           fragmentShader: fireFrag,
           transparent: true,
@@ -433,7 +433,7 @@ export class Explosions {
       e.frags.material.uniforms.uAge.value = e.age;
       if (e.fire) {
         const t = Math.min(1, e.age / 1.6);
-        const r = (e.big ? 26 : 16) * (1 - Math.exp(-6 * e.age)) * (1 + 0.35 * e.age);
+        const r = (e.big ? 19 : 13) * (1 - Math.exp(-6 * e.age)) * (1 + 0.3 * e.age);
         e.fire.scale.setScalar(Math.max(0.01, r));
         e.fire.material.uniforms.uT.value = t;
         e.fire.visible = t < 1;
@@ -446,7 +446,7 @@ export class Explosions {
       }
       // light thrown onto the land
       let k;
-      if (e.kind === 'death') k = 7 * Math.exp(-e.age * 2.5) + (e.burn ? 1.2 * Math.exp(-e.age * 0.6) * (0.8 + 0.2 * Math.sin(e.age * 23)) : 0);
+      if (e.kind === 'death') k = 4.2 * Math.exp(-e.age * 2.5) + (e.burn ? 1.0 * Math.exp(-e.age * 0.6) * (0.8 + 0.2 * Math.sin(e.age * 23)) : 0);
       else k = 1.5 * e.strength * Math.exp(-e.age * 6);
       if (k > best) {
         best = k;
