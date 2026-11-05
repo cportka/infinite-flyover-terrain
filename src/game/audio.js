@@ -15,6 +15,10 @@ const PROGRESSIONS = [
   { chords: [[52, 59, 63, 66], [49, 56, 59, 64], [45, 52, 56, 61], [47, 54, 56, 61]], scale: [64, 66, 68, 71, 73, 76, 78, 80] },
   // Cinder Fields — C minor
   { chords: [[48, 55, 58, 62], [44, 51, 55, 60], [53, 56, 60, 63], [55, 58, 62, 65]], scale: [60, 63, 65, 67, 70, 72, 75] },
+  // Requiem Moors — D minor / phrygian, with organ and bells
+  { chords: [[50, 57, 60, 64], [46, 53, 57, 64], [55, 58, 62, 64], [45, 52, 55, 58]], scale: [62, 63, 65, 67, 69, 70, 74], organ: true, bells: true },
+  // Prismatic Expanse — C lydian
+  { chords: [[48, 55, 59, 66], [48, 54, 57, 62], [52, 55, 59, 62], [54, 57, 60, 64]], scale: [72, 74, 76, 78, 79, 83, 84], sparkle: true },
 ];
 
 const CHORD_LEN = 8;
@@ -118,6 +122,27 @@ export class AudioEngine {
     src.connect(this.windFilter).connect(this.windGain).connect(this.master);
     src.start();
 
+    // the Borderland: two low voices beating against each other
+    this.borderGain = ctx.createGain();
+    this.borderGain.gain.value = 0;
+    const bf = ctx.createBiquadFilter();
+    bf.type = 'lowpass';
+    bf.frequency.value = 420;
+    this.borderGain.connect(bf).connect(this.music);
+    for (const [f, type] of [[55, 'sawtooth'], [58.3, 'sawtooth'], [82.4, 'triangle'], [116.6, 'sine']]) {
+      const o = ctx.createOscillator();
+      o.type = type;
+      o.frequency.value = f;
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 0.07 + Math.random() * 0.1;
+      const lg = ctx.createGain();
+      lg.gain.value = f * 0.012;
+      lfo.connect(lg).connect(o.frequency);
+      o.connect(this.borderGain);
+      o.start();
+      lfo.start();
+    }
+
     const now = ctx.currentTime;
     this.nextChord = now + 0.15;
     this.nextChime = now + 2.5;
@@ -185,6 +210,7 @@ export class AudioEngine {
     const chord = prog.chords[this.chordIdx % prog.chords.length];
     this.chordIdx++;
     for (const m of chord) this.padVoice(m, t, CHORD_LEN, 0.03);
+    if (prog.organ) for (const m of chord) this.organVoice(m - 12, t, CHORD_LEN);
     // soft sub bass
     const ctx = this.ctx;
     const o = ctx.createOscillator();
@@ -243,8 +269,11 @@ export class AudioEngine {
     if (this.nextChime < now - 1) this.nextChime = now + 0.5;
     if (this.nextChime < now + 0.15) {
       const scale = (PROGRESSIONS[this.biome] || PROGRESSIONS[0]).scale;
+      const prog = PROGRESSIONS[this.biome] || PROGRESSIONS[0];
       const m = scale[Math.floor(Math.random() * scale.length)];
-      this.pluck(m, this.nextChime, 0.05 + Math.random() * 0.03, this.music, (Math.random() - 0.5) * 1.2);
+      if (prog.bells && Math.random() < 0.45) this.bell(m - 12, this.nextChime, 0.05);
+      else this.pluck(m, this.nextChime, 0.05 + Math.random() * 0.03, this.music, (Math.random() - 0.5) * 1.2);
+      if (prog.sparkle) for (let i = 1; i < 4; i++) this.pluck(scale[(scale.indexOf(m) + i * 2) % scale.length], this.nextChime + i * 0.11, 0.025, this.music, (Math.random() - 0.5) * 1.6);
       if (Math.random() < 0.3) {
         const m2 = scale[Math.min(scale.length - 1, scale.indexOf(m) + 2)];
         this.pluck(m2, this.nextChime + 0.18, 0.04, this.music, (Math.random() - 0.5) * 1.2);
@@ -254,6 +283,149 @@ export class AudioEngine {
     const sp = Math.min(1.4, state.speed / 128);
     this.windFilter.frequency.setTargetAtTime(280 + sp * 1300, now, 0.3);
     this.windGain.gain.setTargetAtTime(0.025 + sp * 0.085 + (state.boosting ? 0.05 : 0), now, 0.25);
+  }
+
+  organVoice(midi, t, dur) {
+    const ctx = this.ctx;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.022, t + 1.2);
+    g.gain.setValueAtTime(0.022, t + dur - 0.3);
+    g.gain.linearRampToValueAtTime(0, t + dur + 1.8);
+    const f = ctx.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.value = 1600;
+    g.connect(f).connect(this.music);
+    // stacked pipes: 8', 4' and a quiet 2 2/3' mixture
+    for (const [mul, vol] of [[1, 1], [2, 0.55], [3, 0.25]]) {
+      const o = ctx.createOscillator();
+      o.type = 'square';
+      o.frequency.value = mtof(midi) * mul;
+      const og = ctx.createGain();
+      og.gain.value = vol * 0.5;
+      o.connect(og).connect(g);
+      o.start(t);
+      o.stop(t + dur + 2);
+    }
+  }
+
+  /** Bell: inharmonic partials, long decay. */
+  bell(midi, t, vol) {
+    const ctx = this.ctx;
+    const f = mtof(midi);
+    for (const [ratio, amp, dec] of [[1, 1, 3.5], [2.76, 0.45, 2.2], [5.4, 0.25, 1.2], [0.5, 0.35, 4.5]]) {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = f * ratio;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol * amp, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dec);
+      o.connect(g);
+      g.connect(this.music);
+      g.connect(this.delay);
+      o.start(t);
+      o.stop(t + dec + 0.1);
+    }
+  }
+
+  /** Ambient state: how much Borderland and dream surround the listener. */
+  setAmbience(border, dream) {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    this.borderGain.gain.setTargetAtTime(Math.min(1, border) * 0.07, now, 0.8);
+    this.padFilter.frequency.setTargetAtTime(950 + dream * 1500, now, 2);
+  }
+
+  noiseBurst(t, dur, f0, f1, type, vol, dest = this.sfx) {
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const f = ctx.createBiquadFilter();
+    f.type = type;
+    f.frequency.setValueAtTime(f0, t);
+    f.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f).connect(g).connect(dest);
+    src.start(t);
+    src.stop(t + dur + 0.05);
+  }
+
+  /** The end of a flight: a deep boom plus the voice of whatever was struck. */
+  explosion(style) {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== 'running') return;
+    const t = ctx.currentTime + 0.01;
+    // sub boom
+    const o = ctx.createOscillator();
+    o.frequency.setValueAtTime(90, t);
+    o.frequency.exponentialRampToValueAtTime(28, t + 1.2);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.7, t);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + 1.4);
+    o.connect(og).connect(this.sfx);
+    o.start(t);
+    o.stop(t + 1.5);
+    this.noiseBurst(t, 1.6, 1800, 60, 'lowpass', 0.9);
+    const scale = (PROGRESSIONS[this.biome] || PROGRESSIONS[0]).scale;
+    switch (style) {
+      case 'crystal':
+      case 'prism':
+      case 'obsidian':
+        for (let i = 0; i < 14; i++) this.pluck(scale[Math.floor(Math.random() * scale.length)] + 12, t + i * 0.035 + Math.random() * 0.05, 0.05, this.sfx, Math.random() * 2 - 1);
+        this.noiseBurst(t, 0.8, 9000, 3000, 'highpass', 0.25);
+        break;
+      case 'splash':
+      case 'mirror':
+        this.noiseBurst(t, 1.8, 2400, 300, 'bandpass', 0.8);
+        this.noiseBurst(t + 0.25, 1.2, 5000, 1200, 'highpass', 0.25);
+        break;
+      case 'wood':
+        for (let i = 0; i < 6; i++) this.noiseBurst(t + i * 0.07 + Math.random() * 0.05, 0.12, 3000, 800, 'bandpass', 0.35);
+        this.noiseBurst(t + 0.1, 2.5, 900, 200, 'bandpass', 0.25);
+        break;
+      case 'fire':
+      case 'inferno':
+      case 'ash':
+        this.noiseBurst(t, 2.8, 1200, 120, 'lowpass', 0.6);
+        for (let i = 0; i < 10; i++) this.noiseBurst(t + 0.2 + Math.random() * 2, 0.04, 4000, 2000, 'highpass', 0.15);
+        break;
+      case 'spores':
+        this.noiseBurst(t, 1.5, 6000, 1500, 'bandpass', 0.2);
+        for (let i = 0; i < 6; i++) this.pluck(scale[i % scale.length] + 12, t + i * 0.09, 0.04, this.sfx, (i % 2) * 1.4 - 0.7);
+        break;
+      case 'snow':
+      case 'sand':
+        this.noiseBurst(t, 2.2, 1600, 300, 'bandpass', 0.5);
+        break;
+      default:
+        this.noiseBurst(t + 0.05, 2.0, 500, 60, 'lowpass', 0.7);
+    }
+    // a slow, mournful chord in the aftermath
+    const chord = (PROGRESSIONS[this.biome] || PROGRESSIONS[0]).chords[this.chordIdx % 4];
+    for (const m of chord) this.padVoice(m - 12, t + 0.6, 4, 0.035);
+  }
+
+  /** A survivable impact. */
+  hit(style, damage) {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== 'running') return;
+    const t = ctx.currentTime;
+    const v = Math.min(1, damage / 50);
+    this.noiseBurst(t, 0.35, 1400, 120, 'lowpass', 0.25 + 0.35 * v);
+    const o = ctx.createOscillator();
+    o.frequency.setValueAtTime(120, t);
+    o.frequency.exponentialRampToValueAtTime(45, t + 0.3);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.25 + 0.3 * v, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+    o.connect(g).connect(this.sfx);
+    o.start(t);
+    o.stop(t + 0.4);
+    if (style === 'crystal' || style === 'prism') this.pluck(84 + Math.floor(Math.random() * 6), t, 0.08, this.sfx, 0);
+    if (style === 'splash' || style === 'mirror') this.noiseBurst(t, 0.6, 3000, 600, 'bandpass', 0.3);
   }
 
   collect(combo, golden) {

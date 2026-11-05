@@ -316,3 +316,210 @@ export class Birds {
     this.mesh.frustumCulled = false;
   }
 }
+
+// ---------------------------------------------------------------- neon shapes (dream phase)
+
+function baryGeometry(geo) {
+  // expand an indexed {v, f} into a non-indexed geometry with barycentric coordinates
+  const pos = [];
+  const bary = [];
+  for (let i = 0; i < geo.f.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      const vi = geo.f[i + k] * 3;
+      pos.push(geo.v[vi], geo.v[vi + 1], geo.v[vi + 2]);
+      bary.push(k === 0 ? 1 : 0, k === 1 ? 1 : 0, k === 2 ? 1 : 0);
+    }
+  }
+  return { pos: new Float32Array(pos), bary: new Float32Array(bary) };
+}
+
+const OCTA = {
+  v: [1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1, 0, 0, -1],
+  f: [0, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0, 0, 4, 3, 4, 1, 3, 1, 5, 3, 5, 0, 3],
+};
+const TETRA = {
+  v: [1, 1, 1, -1, -1, 1, -1, 1, -1, 1, -1, -1].map((x) => x * 0.8),
+  f: [0, 1, 2, 0, 3, 1, 0, 2, 3, 1, 3, 2],
+};
+
+const neonVert = /* glsl */ `
+attribute vec3 aBary;
+attribute vec4 aCenter;
+attribute vec4 aParams;
+uniform float uTime;
+uniform float uDream;
+varying vec3 vBary;
+varying vec3 vWorldPos;
+varying vec3 vN;
+varying float vHue;
+varying float vVis;
+mat3 rotAxis(vec3 a, float ang) {
+  float c = cos(ang);
+  float s = sin(ang);
+  float t = 1.0 - c;
+  return mat3(
+    t * a.x * a.x + c, t * a.x * a.y + s * a.z, t * a.x * a.z - s * a.y,
+    t * a.x * a.y - s * a.z, t * a.y * a.y + c, t * a.y * a.z + s * a.x,
+    t * a.x * a.z + s * a.y, t * a.y * a.z - s * a.x, t * a.z * a.z + c);
+}
+void main() {
+  vec2 rel = mod(aCenter.xz - cameraPosition.xz + 2048.0, 4096.0) - 2048.0;
+  float far = 1.0 - smoothstep(1500.0, 1950.0, length(rel));
+  float vis = smoothstep(aParams.w, aParams.w + 0.2, uDream) * far;
+  vec3 axis = normalize(vec3(sin(aCenter.w * 12.9), cos(aCenter.w * 7.3), sin(aCenter.w * 3.1 + 1.0)));
+  mat3 R = rotAxis(axis, uTime * aParams.y + aCenter.w * 6.28);
+  vec3 lp = R * (position * aParams.x * vis);
+  vec3 center = vec3(cameraPosition.x + rel.x, aCenter.y + sin(uTime * 0.25 + aCenter.w * 9.0) * 8.0, cameraPosition.z + rel.y);
+  vec3 wp = center + lp;
+  vWorldPos = wp;
+  vBary = aBary;
+  vHue = aParams.z;
+  vVis = vis;
+  vN = R * normalize(position);
+  gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+}
+`;
+
+const neonFrag = /* glsl */ `
+${GLSL}
+varying vec3 vBary;
+varying vec3 vWorldPos;
+varying vec3 vN;
+varying float vHue;
+varying float vVis;
+void main() {
+  if (vVis < 0.01) discard;
+  float e = min(vBary.x, min(vBary.y, vBary.z));
+  float fw = fwidth(e);
+  float edge = 1.0 - smoothstep(fw * 0.8, fw * 2.2 + 0.012, e);
+  vec3 V = normalize(cameraPosition - vWorldPos);
+  float fres = pow(1.0 - abs(dot(normalize(vN), V)), 2.0);
+  vec3 c = mix(neonPalette(vHue + uTime * 0.04), mix(uNeonA, uNeonB, 0.5 + 0.5 * sin(uTime * 0.3 + vHue * 6.0)), 0.35);
+  vec3 col = c * (edge * 3.2 + 0.04 + fres * 0.3);
+  col *= 1.0 - fogAmount(vWorldPos) * 0.85;
+  gl_FragColor = vec4(col * vVis, 1.0);
+}
+`;
+
+const pillarVert = /* glsl */ `
+attribute vec4 aCenter;
+attribute vec4 aParams;
+uniform float uTime;
+uniform float uDream;
+varying float vY;
+varying float vHue;
+varying float vVis;
+varying vec3 vWorldPos;
+varying vec3 vN;
+void main() {
+  vec2 rel = mod(aCenter.xz - cameraPosition.xz + 2048.0, 4096.0) - 2048.0;
+  float far = 1.0 - smoothstep(1500.0, 1950.0, length(rel));
+  float vis = smoothstep(aParams.w, aParams.w + 0.2, uDream) * far;
+  float r = aParams.x * (0.85 + 0.15 * sin(uTime * 2.0 + aCenter.w * 20.0));
+  vec3 wp = vec3(cameraPosition.x + rel.x + position.x * r * vis, -30.0 + position.y * aParams.y, cameraPosition.z + rel.y + position.z * r * vis);
+  vY = position.y;
+  vHue = aParams.z;
+  vVis = vis;
+  vWorldPos = wp;
+  vN = normalize(vec3(position.x, 0.0, position.z));
+  gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+}
+`;
+
+const pillarFrag = /* glsl */ `
+${GLSL}
+varying float vY;
+varying float vHue;
+varying float vVis;
+varying vec3 vWorldPos;
+varying vec3 vN;
+void main() {
+  if (vVis < 0.01) discard;
+  vec3 V = normalize(cameraPosition - vWorldPos);
+  float core = pow(abs(dot(vN, V)), 2.0);
+  float fade = pow(1.0 - vY, 1.6) * smoothstep(0.0, 0.03, vY);
+  vec3 c = mix(neonPalette(vHue + uTime * 0.03), uNeonB, 0.3);
+  vec3 col = c * (0.12 + 0.75 * core) * fade;
+  col *= 1.0 - fogAmount(vWorldPos) * 0.8;
+  gl_FragColor = vec4(col * vVis, 1.0);
+}
+`;
+
+export class NeonShapes {
+  constructor(shared, { seed = 23 } = {}) {
+    const rnd = mulberry32(seed);
+    this.group = new THREE.Group();
+    const shapes = [
+      { geo: OCTA, count: 14, size: [14, 34] },
+      { geo: ico(1, 0, 0, rnd), count: 12, size: [16, 38] },
+      { geo: TETRA, count: 12, size: [12, 30] },
+      { geo: ico(1, 1, 0, rnd), count: 5, size: [30, 60] },
+    ];
+    const mk = (count, sizeMin, sizeMax, yMin, yMax) => {
+      const centers = new Float32Array(count * 4);
+      const params = new Float32Array(count * 4);
+      for (let i = 0; i < count; i++) {
+        centers[i * 4] = rnd() * 4096;
+        centers[i * 4 + 1] = yMin + rnd() * (yMax - yMin);
+        centers[i * 4 + 2] = rnd() * 4096;
+        centers[i * 4 + 3] = rnd();
+        params[i * 4] = sizeMin + rnd() * (sizeMax - sizeMin);
+        params[i * 4 + 1] = (rnd() - 0.5) * 0.5;
+        params[i * 4 + 2] = rnd();
+        params[i * 4 + 3] = rnd() * 0.55;
+      }
+      return { centers, params };
+    };
+    this.materials = [];
+    for (const s of shapes) {
+      const b = baryGeometry(s.geo);
+      const g = new THREE.InstancedBufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(b.pos, 3));
+      g.setAttribute('aBary', new THREE.BufferAttribute(b.bary, 3));
+      const { centers, params } = mk(s.count, s.size[0], s.size[1], 90, 460);
+      g.setAttribute('aCenter', new THREE.InstancedBufferAttribute(centers, 4));
+      g.setAttribute('aParams', new THREE.InstancedBufferAttribute(params, 4));
+      g.instanceCount = s.count;
+      const m = new THREE.ShaderMaterial({
+        uniforms: { ...shared },
+        vertexShader: neonVert,
+        fragmentShader: neonFrag,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(g, m);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 6;
+      this.group.add(mesh);
+      this.materials.push(m);
+    }
+    // beams of light rising out of the land
+    const cyl = new THREE.CylinderGeometry(1, 1, 1, 16, 1, true);
+    cyl.translate(0, 0.5, 0);
+    const pg = new THREE.InstancedBufferGeometry();
+    pg.setAttribute('position', cyl.getAttribute('position'));
+    pg.setIndex(cyl.getIndex());
+    const n = 12;
+    const { centers, params } = mk(n, 2, 6, 0, 0);
+    for (let i = 0; i < n; i++) params[i * 4 + 1] = 600 + rnd() * 700;
+    pg.setAttribute('aCenter', new THREE.InstancedBufferAttribute(centers, 4));
+    pg.setAttribute('aParams', new THREE.InstancedBufferAttribute(params, 4));
+    pg.instanceCount = n;
+    const pm = new THREE.ShaderMaterial({
+      uniforms: { ...shared },
+      vertexShader: pillarVert,
+      fragmentShader: pillarFrag,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+    const pillars = new THREE.Mesh(pg, pm);
+    pillars.frustumCulled = false;
+    pillars.renderOrder = 6;
+    this.group.add(pillars);
+    this.materials.push(pm);
+  }
+}

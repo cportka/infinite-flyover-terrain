@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Infinite Flyover</title>
-    <meta name="description" content="An endless procedural flyover game: glide forever through ever-changing low-poly lands, thread light rings and chase the horizon." />
+    <meta name="description" content="An endless procedural flyover in any direction: lands that dream and remember, a short memory, borderlands where worlds meet, and a glider you can crash in many beautiful ways." />
     <meta name="theme-color" content="#0b0e1a" />
     <meta property="og:title" content="Infinite Flyover" />
-    <meta property="og:description" content="Glide forever through an endless, procedurally generated world." />
+    <meta property="og:description" content="An endless dream of land and memory." />
     <meta property="og:type" content="website" />
     <meta property="og:image" content="https://cportka.github.io/infinite-flyover-terrain/og.jpg" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -15,7 +15,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@1,400;1,500&family=Outfit:wght@200;300;400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;1,400;1,500&family=Outfit:wght@200;300;400;500;600&display=swap"
       rel="stylesheet"
     />
   </head>
@@ -31,24 +31,23 @@
         </div>
       </div>
 
-      <div id="title" class="screen hidden">
-        <div class="title-wrap">
-          <div class="eyebrow">An endless procedural journey</div>
-          <h1 class="wordmark"><span>Infinite</span><span>Flyover</span></h1>
-          <p class="lede">Glide forever through lands that never repeat. Thread rings of light, chain combos, and chase the horizon through day and night.</p>
-          <div class="actions">
-            <button id="btn-play" class="btn primary" type="button">Take flight</button>
-            <button id="btn-zen" class="btn ghost" type="button">Zen mode</button>
-          </div>
-          <div class="keys">
-            <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / drag <span>steer</span></div>
-            <div><kbd>Space</kbd> <span>boost</span></div>
-            <div><kbd>C</kbd> <span>camera</span></div>
-            <div><kbd>P</kbd> <span>pause</span></div>
-          </div>
-          <div class="best" id="best-line"></div>
-        </div>
+      <div id="titlecard" class="hidden" aria-hidden="true">
+        <div class="tc-eyebrow">an endless dream of land and memory</div>
+        <h1 class="wordmark"><span>Infinite</span><span>Flyover</span></h1>
       </div>
+
+      <div id="corner">
+        <button class="icon-btn" id="btn-game" type="button" aria-pressed="false" aria-label="Fly the glider and chase rings" title="Glider &amp; rings (G)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 L21 15 L12 12.5 L3 15 Z" /></svg>
+        </button>
+        <button class="icon-btn" id="btn-sound" type="button" aria-pressed="false" aria-label="Toggle sound" title="Sound (M)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9.5h3.5L13 5.5v13l-4.5-4H5z" /><path class="wave" d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" /></svg>
+        </button>
+        <button class="icon-btn" id="btn-menu" type="button" aria-label="Menu and settings" title="Menu (P)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14M5 12h14M5 16h14" /></svg>
+        </button>
+      </div>
+      <div id="sound-hint">tap anywhere for sound</div>
 
       <div id="hud" class="hidden">
         <div class="hud-tl">
@@ -56,33 +55,42 @@
           <div class="score" id="hud-score">0</div>
           <div class="combo" id="hud-combo"><span>×</span><b id="hud-combo-n">1</b></div>
         </div>
-        <div class="hud-tr">
-          <div class="stat"><span class="stat-label">Distance</span><span class="stat-val" id="hud-dist">0.0 km</span></div>
-          <div class="stat"><span class="stat-label" id="hud-clock-icon">☀</span><span class="stat-val" id="hud-clock">17:00</span></div>
-          <div class="buttons">
-            <button class="icon-btn" id="btn-sound" type="button" aria-label="Toggle sound" title="Sound (M)">♪</button>
-            <button class="icon-btn" id="btn-pause" type="button" aria-label="Pause" title="Pause (P)">❚❚</button>
-          </div>
-        </div>
         <div class="hud-bottom">
-          <div class="boost-wrap">
-            <div class="boost-label">Boost</div>
-            <div class="boost-bar"><span id="hud-boost"></span></div>
-          </div>
+          <div class="meter"><div class="meter-label">Hull</div><div class="meter-bar health"><span id="hud-health"></span></div></div>
+          <div class="meter"><div class="meter-label">Boost</div><div class="meter-bar boost"><span id="hud-boost"></span></div></div>
         </div>
-        <div id="region-toast" aria-live="polite">
-          <div class="region-line"></div>
-          <div class="region-name" id="region-name"></div>
-          <div class="region-tag" id="region-tag"></div>
-        </div>
-        <div id="popups"></div>
         <div id="autopilot-badge">Autopilot · steer to take over</div>
-        <div id="zen-exit" class="hidden"><button class="btn ghost small" id="btn-zen-exit" type="button">Exit zen</button></div>
+        <div id="popups"></div>
+      </div>
+
+      <div id="status">
+        <span id="st-dist">0.0 km</span><span class="dot">·</span><span id="st-clock">17:00</span>
+      </div>
+
+      <div id="region-toast" aria-live="polite">
+        <div class="region-line"></div>
+        <div class="region-name" id="region-name"></div>
+        <div class="region-tag" id="region-tag"></div>
+      </div>
+
+      <div id="whisper" aria-live="polite"></div>
+
+      <div id="eulogy" aria-live="assertive">
+        <div class="eulogy-line" id="eulogy-line"></div>
+        <div class="eulogy-sub" id="eulogy-sub"></div>
       </div>
 
       <div id="pause" class="screen hidden">
         <div class="panel">
           <h2>Paused</h2>
+          <div class="setting">
+            <label for="opt-dream">Dreaming</label>
+            <select id="opt-dream">
+              <option value="auto">Drift between</option>
+              <option value="dream">Always dream</option>
+              <option value="real">Stay real</option>
+            </select>
+          </div>
           <div class="setting">
             <label for="opt-quality">Quality</label>
             <select id="opt-quality">
@@ -93,7 +101,7 @@
             </select>
           </div>
           <div class="setting">
-            <label for="opt-camera">Camera</label>
+            <label for="opt-camera">Glider camera</label>
             <select id="opt-camera">
               <option value="chase">Chase</option>
               <option value="cinematic">Cinematic</option>
@@ -117,11 +125,17 @@
             <label for="opt-invert">Invert vertical</label>
             <input id="opt-invert" type="checkbox" />
           </div>
-          <div class="seed-line">World seed <b id="seed-val"></b></div>
+          <div class="keys">
+            <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / drag <span>steer</span></div>
+            <div><kbd>G</kbd> <span>glider</span></div>
+            <div><kbd>Space</kbd> <span>boost</span></div>
+            <div><kbd>R</kbd> <span>dream</span></div>
+            <div><kbd>H</kbd> <span>hide ui</span></div>
+          </div>
+          <div class="seed-line">World seed <b id="seed-val"></b> · <span id="best-line"></span></div>
           <div class="actions">
             <button id="btn-resume" class="btn primary" type="button">Resume</button>
             <button id="btn-newworld" class="btn ghost" type="button">New world</button>
-            <button id="btn-menu" class="btn ghost" type="button">Title</button>
           </div>
         </div>
       </div>
