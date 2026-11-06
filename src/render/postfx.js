@@ -4,6 +4,16 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
+// NaN/Inf guard for HDR colour. Bit test on the exponent: unlike isnan() or
+// comparisons, drivers cannot optimise it away under fast-math assumptions.
+const SANITIZE_GLSL = /* glsl */ `
+vec4 sanitizeHDR(vec4 c) {
+  uvec4 e = floatBitsToUint(c) & uvec4(0x7f800000u);
+  if (any(equal(e, uvec4(0x7f800000u)))) return vec4(0.0);
+  return clamp(c, 0.0, 1.0e3);
+}
+`;
+
 const FinalShader = {
   name: 'FinalGrade',
   uniforms: {
@@ -17,6 +27,7 @@ const FinalShader = {
     uSaturation: { value: 1.08 },
     uFade: { value: 0 },
     uFlash: { value: 0 },
+    uDream: { value: 0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -36,7 +47,15 @@ const FinalShader = {
     uniform float uSaturation;
     uniform float uFade;
     uniform float uFlash;
+    uniform float uDream;
     varying vec2 vUv;
+
+    ${SANITIZE_GLSL}
+    vec3 hueRotate(vec3 c, float a) {
+      const vec3 k = vec3(0.57735);
+      float cs = cos(a);
+      return c * cs + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cs);
+    }
 
     // ACES fitted (Stephen Hill)
     vec3 RRTAndODTFit(vec3 v) {
@@ -72,11 +91,14 @@ const FinalShader = {
       } else {
         col = texture2D(tDiffuse, uv).rgb;
       }
+      col = sanitizeHDR(vec4(col, 1.0)).rgb;
       col *= uExposure / 0.6;
       col += uFlash;
       col = aces(col);
       float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
-      col = mix(vec3(l), col, uSaturation);
+      col = mix(vec3(l), col, uSaturation + 0.28 * uDream);
+      // the dream drifts through hues; reality stays true
+      col = mix(col, clamp(hueRotate(col, sin(uTime * 0.045) * 0.35), 0.0, 1.0), uDream * 0.45);
       // gentle filmic S-curve
       col = mix(col, col * col * (3.0 - 2.0 * col), 0.18);
       float aspect = uResolution.x / max(uResolution.y, 1.0);
@@ -104,6 +126,14 @@ export class PostFX {
     this.composer.addPass(this.renderPass);
     this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.5, 0.42, 1.6);
     this.bloom.enabled = bloom;
+    // Never let a stray NaN/Inf pixel into the bloom chain: the blur mips would
+    // smear it over the whole frame and the screen would go black.
+    const hp = this.bloom.materialHighPassFilter;
+    hp.fragmentShader = SANITIZE_GLSL + hp.fragmentShader.replace(
+      'vec4 texel = texture2D( tDiffuse, vUv );',
+      'vec4 texel = texture2D( tDiffuse, vUv );\n\t\t\ttexel = sanitizeHDR( texel );',
+    );
+    hp.needsUpdate = true;
     this.composer.addPass(this.bloom);
     this.final = new ShaderPass(FinalShader);
     this.composer.addPass(this.final);

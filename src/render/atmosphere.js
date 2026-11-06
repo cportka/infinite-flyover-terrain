@@ -29,8 +29,19 @@ function smooth(u) {
   return u * u * (3 - 2 * u);
 }
 
+const DREAM_PERIOD = 270; // seconds for a full reality -> dream -> reality cycle
+
+/** 0..1: about a third of the cycle real, a third dreaming, with slow transitions. */
+function dreamCycle(phase) {
+  const p = phase - Math.floor(phase);
+  if (p < 0.34) return 0;
+  if (p < 0.5) return smooth((p - 0.34) / 0.16);
+  if (p < 0.84) return 1;
+  return 1 - smooth((p - 0.84) / 0.16);
+}
+
 export class Atmosphere {
-  constructor(shared, sky, { startTime = 0.66, dayLength = 420 } = {}) {
+  constructor(shared, sky, { startTime = 0.66, dayLength = 420, dreamPhase = 0.36 } = {}) {
     this.u = shared;
     this.sky = sky;
     this.t = startTime;
@@ -48,7 +59,21 @@ export class Atmosphere {
     };
     this.cloud = new THREE.Vector2(0, 0);
     this.tmp = { top: new THREE.Color(), hor: new THREE.Color(), glow: new THREE.Color(), sun: new THREE.Color(), amb: new THREE.Color(), gnd: new THREE.Color() };
-    this.biomeMix = { tint: new THREE.Vector3(1, 1, 1), fog: 1, heightFog: 1, clouds: 0.6, aurora: 0, wind: 1 };
+    this.biomeMix = {
+      tint: new THREE.Vector3(1, 1, 1), fog: 1, heightFog: 1, clouds: 0.6, aurora: 0, wind: 1,
+      moon: new THREE.Color(0.85, 0.9, 1), neonA: new THREE.Color(), neonB: new THREE.Color(), dream: 0, border: 0,
+    };
+    this.dreamMode = 'auto'; // auto | dream | real
+    this.dreamPhase = dreamPhase;
+    this.dream = dreamCycle(dreamPhase);
+    this.tmpA = new THREE.Color();
+    this.tmpB = new THREE.Color();
+  }
+
+  /** Progress of the dream cycle that the UI can reflect on ('rising' / 'falling'). */
+  get dreamTrend() {
+    const p = this.dreamPhase - Math.floor(this.dreamPhase);
+    return p >= 0.34 && p < 0.5 ? 'rising' : p >= 0.84 ? 'falling' : p >= 0.5 ? 'dream' : 'real';
   }
 
   /** Day progress per real second, with faster nights and slightly slower golden hours. */
@@ -58,10 +83,15 @@ export class Atmosphere {
     return (1 / this.dayLength) * (night ? 2.1 : golden ? 0.8 : 1.0);
   }
 
-  setBiomeBlend(a, b, t) {
+  setBiomeBlend(a, b, t, border = 0) {
     const A = BIOMES[a].atmo;
     const B = BIOMES[b].atmo;
     const m = this.biomeMix;
+    m.moon.setRGB(...A.moon, THREE.SRGBColorSpace).lerp(this.tmpA.setRGB(...B.moon, THREE.SRGBColorSpace), t);
+    m.neonA.setRGB(...BIOMES[a].neon[0], THREE.SRGBColorSpace).lerp(this.tmpA.setRGB(...BIOMES[b].neon[0], THREE.SRGBColorSpace), t);
+    m.neonB.setRGB(...BIOMES[a].neon[1], THREE.SRGBColorSpace).lerp(this.tmpB.setRGB(...BIOMES[b].neon[1], THREE.SRGBColorSpace), t);
+    m.dream = A.dream + (B.dream - A.dream) * t;
+    m.border = border;
     m.tint.set(
       A.tint[0] + (B.tint[0] - A.tint[0]) * t,
       A.tint[1] + (B.tint[1] - A.tint[1]) * t,
@@ -139,9 +169,26 @@ export class Atmosphere {
     this.cloud.y = (this.cloud.y + dt * 0.006 * m.wind) % 16;
     U.uCloudOffset.value.copy(this.cloud);
 
+    // ---- dream / reality
+    this.dreamPhase += dt / DREAM_PERIOD;
+    let target;
+    if (this.dreamMode === 'dream') target = 1;
+    else if (this.dreamMode === 'real') target = 0;
+    else target = Math.min(1, dreamCycle(this.dreamPhase) * 0.92 + m.dream + m.border * 0.75);
+    this.dream += (target - this.dream) * (1 - Math.exp(-dt * 0.45));
+    const D = this.dream;
+    U.uDream.value = D;
+    U.uNeonA.value.copy(m.neonA);
+    U.uNeonB.value.copy(m.neonB);
+    // the dream glows brighter
+    U.uGlow.value += D * 0.6;
+
     if (this.sky) {
-      this.sky.material.uniforms.uStars.value = P.stars;
-      this.sky.material.uniforms.uAurora.value = m.aurora * P.night;
+      const su = this.sky.material.uniforms;
+      su.uStars.value = Math.max(P.stars, D * 0.35);
+      su.uAurora.value = m.aurora * P.night + D * 0.45;
+      su.uMoonColor.value.copy(m.moon);
+      su.uPlanet.value = D * (0.55 + 0.45 * P.night);
     }
 
     const s = this.state;
@@ -150,6 +197,7 @@ export class Atmosphere {
     s.exposure = P.exposure;
     s.daylight = 1 - P.night;
     s.wind = m.wind;
+    s.dream = D;
   }
 
   /** "HH:MM" for the HUD. */

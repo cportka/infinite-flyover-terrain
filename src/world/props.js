@@ -3,7 +3,7 @@
 // can be coloured per part (trunk / foliage / accent / glow) when baked into a chunk.
 // Rendering uses derivative (flat) normals, so winding order never matters.
 
-import { mulberry32 } from './noise.js';
+import { mulberry32, clamp } from './noise.js';
 
 const TAU = Math.PI * 2;
 
@@ -258,8 +258,86 @@ export class Proto {
         ao[i] = 0.8 + 0.2 * Math.min(1, hn * 1.5);
       }
     }
-    return { pos, part, sway, ao, count, height, radius: maxR, minY };
+    const nrm = smoothNormals(pos, part, count, o.crease ?? 1.3);
+    return { pos, part, sway, ao, nrm, count, height, radius: maxR, minY };
   }
+}
+
+/**
+ * Crease-limited smooth normals for a triangle soup with arbitrary winding.
+ * Each vertex normal is oriented relative to its own face, so the three
+ * normals of a triangle always agree; the shader then aligns them with the
+ * (viewer-facing) flat normal.
+ */
+function smoothNormals(pos, part, count, crease) {
+  const tris = count / 3;
+  const fn = new Float32Array(tris * 3);
+  for (let t = 0; t < tris; t++) {
+    const i = t * 9;
+    const ax = pos[i + 3] - pos[i];
+    const ay = pos[i + 4] - pos[i + 1];
+    const az = pos[i + 5] - pos[i + 2];
+    const bx = pos[i + 6] - pos[i];
+    const by = pos[i + 7] - pos[i + 1];
+    const bz = pos[i + 8] - pos[i + 2];
+    let nx = ay * bz - az * by;
+    let ny = az * bx - ax * bz;
+    let nz = ax * by - ay * bx;
+    const l = Math.hypot(nx, ny, nz);
+    if (l < 1e-12) {
+      nx = 0;
+      ny = 1;
+      nz = 0;
+    } else {
+      nx /= l;
+      ny /= l;
+      nz /= l;
+    }
+    fn[t * 3] = nx;
+    fn[t * 3 + 1] = ny;
+    fn[t * 3 + 2] = nz;
+  }
+  const groups = new Map();
+  const keys = new Array(count);
+  for (let v = 0; v < count; v++) {
+    const key = `${Math.round(pos[v * 3] * 400)},${Math.round(pos[v * 3 + 1] * 400)},${Math.round(pos[v * 3 + 2] * 400)},${part[v]}`;
+    keys[v] = key;
+    let g = groups.get(key);
+    if (!g) {
+      g = [];
+      groups.set(key, g);
+    }
+    g.push(v);
+  }
+  const cosC = Math.cos(crease);
+  const nrm = new Float32Array(count * 3);
+  for (let v = 0; v < count; v++) {
+    const tv = (v / 3) | 0;
+    const vx = fn[tv * 3];
+    const vy = fn[tv * 3 + 1];
+    const vz = fn[tv * 3 + 2];
+    let sx = 0;
+    let sy = 0;
+    let sz = 0;
+    for (const u of groups.get(keys[v])) {
+      const tu = (u / 3) | 0;
+      const ux = fn[tu * 3];
+      const uy = fn[tu * 3 + 1];
+      const uz = fn[tu * 3 + 2];
+      const d = ux * vx + uy * vy + uz * vz;
+      if (Math.abs(d) >= cosC) {
+        const k = d >= 0 ? 1 : -1;
+        sx += k * ux;
+        sy += k * uy;
+        sz += k * uz;
+      }
+    }
+    const l = Math.hypot(sx, sy, sz) || 1;
+    nrm[v * 3] = sx / l;
+    nrm[v * 3 + 1] = sy / l;
+    nrm[v * 3 + 2] = sz / l;
+  }
+  return nrm;
 }
 
 // ------------------------------------------------------------ prototypes
@@ -757,6 +835,238 @@ export function islandProto(radius, rnd) {
   return P.finalize({ aoParts: [] });
 }
 
+// ------------------------------------------------------------ gothic & prismatic
+
+/** Points + outward normals of a pointed (gothic) arch in the XY plane, springing at y0. */
+function pointedArch(span, ratio, y0, segs) {
+  const half = span / 2;
+  const R = span * ratio;
+  const xc = -half + R;
+  const thA = Math.acos(clamp(-xc / R, -1, 1));
+  const pts = [];
+  const nrm = [];
+  for (let i = 0; i <= segs; i++) {
+    const a = Math.PI + (thA - Math.PI) * (i / segs);
+    pts.push([xc + Math.cos(a) * R, y0 + Math.sin(a) * R]);
+    nrm.push([Math.cos(a), Math.sin(a)]);
+  }
+  for (let i = segs; i >= 0; i--) {
+    const a = Math.PI + (thA - Math.PI) * (i / segs);
+    pts.push([-(xc + Math.cos(a) * R), y0 + Math.sin(a) * R]);
+    nrm.push([-Math.cos(a), Math.sin(a)]);
+  }
+  return { pts, nrm, apex: y0 + Math.sin(thA) * R };
+}
+
+function circlePts(r, segs) {
+  const pts = [];
+  const nrm = [];
+  for (let i = 0; i < segs; i++) {
+    const a = (i / segs) * TAU;
+    pts.push([Math.cos(a) * r, Math.sin(a) * r]);
+    nrm.push([Math.cos(a), Math.sin(a)]);
+  }
+  return { pts, nrm };
+}
+
+function gothicSpire(rnd) {
+  const P = new Proto();
+  const w = 3 + rnd() * 1.6;
+  const h1 = 10 + rnd() * 8;
+  P.add(xf(box(w, h1, w), { ty: h1 / 2 }), 0);
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      P.add(xf(box(0.8, h1 * 0.62, 0.8), { tx: sx * w * 0.56, ty: h1 * 0.31, tz: sz * w * 0.56 }), 0);
+      P.add(xf(cone(0.6, 2.6 + rnd() * 2, 4, 0, false, Math.PI / 4), { tx: sx * w * 0.56, ty: h1 * 0.62, tz: sz * w * 0.56 }), 1);
+    }
+  }
+  const h2 = 5 + rnd() * 3;
+  P.add(cylinder(w * 0.52, w * 0.46, h2, 8, h1, false, false, Math.PI / 8), 0);
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * TAU;
+    P.add(xf(box(0.55, h2 * 0.55, 0.12), { ry: a, tx: Math.sin(a) * w * 0.5, ty: h1 + h2 * 0.5, tz: Math.cos(a) * w * 0.5 }), 2);
+    P.add(xf(box(0.45, h1 * 0.3, 0.12), { ry: a, tx: Math.sin(a) * (w * 0.5 + 0.02), ty: h1 * 0.55, tz: Math.cos(a) * (w * 0.5 + 0.02) }), 2);
+  }
+  const h3 = 14 + rnd() * 14;
+  P.add(cone(w * 0.5, h3, 8, h1 + h2, false, Math.PI / 8), 1);
+  P.add(xf(ico(0.35, 0, 0, rnd), { ty: h1 + h2 + h3 + 0.2 }), 1);
+  return P.finalize({ aoParts: [], crease: 0.6 });
+}
+
+function gravestone(rnd) {
+  const P = new Proto();
+  if (rnd() < 0.55) {
+    const w = 0.8 + rnd() * 0.3;
+    const h = 1.0 + rnd() * 0.5;
+    P.add(xf(box(w, h, 0.24), { ty: h / 2 - 0.1 }), 0);
+    P.add(xf(cylinder(w / 2, w / 2, 0.24, 8, -0.12, true, true), { rx: Math.PI / 2, ty: h - 0.1 }), 0);
+  } else {
+    const h = 1.5 + rnd() * 0.6;
+    P.add(xf(box(0.24, h, 0.22), { ty: h / 2 - 0.1 }), 0);
+    P.add(xf(box(0.9, 0.22, 0.22), { ty: h * 0.7 }), 0);
+  }
+  return P.finalize({ aoParts: [], crease: 0.6 });
+}
+
+function lantern(rnd) {
+  const P = new Proto();
+  const h = 2.4 + rnd() * 0.8;
+  P.add(xf(box(0.16, h, 0.16), { ty: h / 2 }), 0);
+  P.add(xf(box(0.5, 0.62, 0.5), { ty: h + 0.31 }), 2);
+  P.add(cone(0.42, 0.5, 4, h + 0.62, true, Math.PI / 4), 0);
+  return P.finalize({ aoParts: [], crease: 0.6 });
+}
+
+function cathedralRuin(rnd) {
+  const P = new Proto();
+  const bays = 3 + Math.floor(rnd() * 3);
+  const bay = 7 + rnd() * 2;
+  const H = 9 + rnd() * 5;
+  const total = bays * bay;
+  for (let i = 0; i <= bays; i++) {
+    const x = -total / 2 + i * bay;
+    const broken = rnd() < 0.3;
+    const ph = broken ? H * (0.3 + rnd() * 0.5) : H;
+    P.add(xf(box(1.6, ph, 1.6), { tx: x, ty: ph / 2 }), 0);
+    if (!broken) P.add(xf(cone(1.0, 2.6, 4, 0, false, Math.PI / 4), { tx: x, ty: H }), 1);
+  }
+  for (let i = 0; i < bays; i++) {
+    if (rnd() < 0.25) continue;
+    const cx = -total / 2 + (i + 0.5) * bay;
+    const { pts, nrm } = pointedArch(bay - 1.6, 0.8 + rnd() * 0.2, H - 0.6, 6);
+    const { g, parts } = tube(pts, nrm, 1.0, 1.2, false, rnd, 0.06, () => 0);
+    xf(g, { tx: cx });
+    P.addParts(g, parts);
+    if (rnd() < 0.75) P.add(xf(box(bay - 2.6, H * 0.5, 0.12), { tx: cx, ty: H * 0.6 }), 2);
+  }
+  return P.finalize({ aoParts: [], crease: 0.6 });
+}
+
+function obelisk(rnd) {
+  const P = new Proto();
+  const h = 8 + rnd() * 7;
+  const w = 1.1 + rnd() * 0.5;
+  P.add(cylinder(w * 0.7, w * 0.5, h, 4, 0, false, false, Math.PI / 4), 0);
+  P.add(cone(w * 0.5, w * 1.2, 4, h, false, Math.PI / 4), 0);
+  const y = h * (0.35 + rnd() * 0.3);
+  P.add(cylinder(w * 0.66, w * 0.64, 0.5, 4, y, false, false, Math.PI / 4), 2);
+  P.add(cylinder(w * 0.62, w * 0.6, 0.25, 4, y + 1.2, false, false, Math.PI / 4), 2);
+  return P.finalize({ aoParts: [], crease: 0.6 });
+}
+
+function octahedronGeo(r) {
+  return {
+    v: [r, 0, 0, -r, 0, 0, 0, r, 0, 0, -r, 0, 0, 0, r, 0, 0, -r],
+    f: [0, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0, 0, 4, 3, 4, 1, 3, 1, 5, 3, 5, 0, 3],
+  };
+}
+
+function stellated(rnd) {
+  const base = ico(1, 0, 0, rnd);
+  const g = { v: base.v.slice(), f: [] };
+  for (let i = 0; i < base.f.length; i += 3) {
+    const a = base.f[i];
+    const b = base.f[i + 1];
+    const c = base.f[i + 2];
+    const cx = (base.v[a * 3] + base.v[b * 3] + base.v[c * 3]) / 3;
+    const cy = (base.v[a * 3 + 1] + base.v[b * 3 + 1] + base.v[c * 3 + 1]) / 3;
+    const cz = (base.v[a * 3 + 2] + base.v[b * 3 + 2] + base.v[c * 3 + 2]) / 3;
+    const l = Math.hypot(cx, cy, cz);
+    const k = 1.75 / l;
+    const t = g.v.length / 3;
+    g.v.push(cx * k, cy * k, cz * k);
+    g.f.push(a, b, t, b, c, t, c, a, t);
+  }
+  return g;
+}
+
+function polyhedron(rnd) {
+  const P = new Proto();
+  const k = rnd();
+  const size = 2.2 + rnd() * 1.6;
+  let g;
+  let sy = 1;
+  if (k < 0.4) {
+    g = octahedronGeo(1);
+    sy = 1.6;
+  } else if (k < 0.72) g = ico(1, 0, 0, rnd);
+  else g = stellated(rnd);
+  xf(g, { s: size, sy: size * sy, ry: rnd() * TAU, rx: (rnd() - 0.5) * 0.4 });
+  let minY = Infinity;
+  for (let i = 1; i < g.v.length; i += 3) minY = Math.min(minY, g.v[i]);
+  xf(g, { ty: -minY - 0.3 });
+  const tri = [];
+  for (let i = 0; i < g.f.length / 3; i++) tri.push(i % 3);
+  P.addParts(g, tri);
+  return P.finalize({ aoParts: [], crease: 0.25 });
+}
+
+function floatingOrb(rnd) {
+  const P = new Proto();
+  P.add(ico(1.2, 1, 0.02, rnd), 2);
+  const { pts, nrm } = circlePts(2.1, 20);
+  const { g, parts } = tube(pts, nrm, 0.16, 0.16, true, rnd, 0, () => 1);
+  xf(g, { rx: Math.PI / 2 + (rnd() - 0.5) * 0.6 });
+  P.addParts(g, parts);
+  return P.finalize({ aoParts: [] });
+}
+
+function prismShard(rnd) {
+  const P = new Proto();
+  const h = 6 + rnd() * 8;
+  const r = 0.9 + rnd() * 0.6;
+  P.add(cylinder(r, r * 0.85, h * 0.78, 3, 0, false, false, rnd() * TAU), 0);
+  P.add(cone(r * 0.85, h * 0.32, 3, h * 0.78, false, rnd() * TAU), 0);
+  P.add(cylinder(r * 1.03, r * 1.0, h * 0.06, 3, h * 0.3, false, false, 0), 2);
+  return P.finalize({ aoParts: [], crease: 0.5 });
+}
+
+/** Gothic gate: a pointed arch over the river, flanked by towers, with a rose window. */
+export function gothicGateProto(span, ratio, legDown, width, depth, rnd) {
+  const P = new Proto();
+  const { pts, nrm, apex } = pointedArch(span, ratio, 0, 14);
+  pts.unshift([-span / 2, -legDown]);
+  nrm.unshift([-1, 0]);
+  pts.push([span / 2, -legDown]);
+  nrm.push([1, 0]);
+  const arch = tube(pts, nrm, width, depth, false, rnd, width * 0.05, (i) => (i % 6 === 3 ? 1 : 0));
+  P.addParts(arch.g, arch.parts);
+  const th = apex * 0.5;
+  for (const sx of [-1, 1]) {
+    const x = sx * (span / 2 + width * 0.3);
+    P.add(xf(box(width * 1.6, th + legDown, depth * 1.25), { tx: x, ty: (th - legDown) / 2 }), 0);
+    P.add(xf(cone(width * 1.1, th * 0.7, 4, 0, false, Math.PI / 4), { tx: x, ty: th }), 1);
+    for (let k = 0; k < 3; k++) {
+      P.add(xf(box(1.0, 5, 0.3), { tx: x, ty: th * (0.35 + k * 0.2), tz: depth * 0.63 }), 2);
+      P.add(xf(box(1.0, 5, 0.3), { tx: x, ty: th * (0.35 + k * 0.2), tz: -depth * 0.63 }), 2);
+    }
+  }
+  const rr = Math.min(span * 0.15, 15);
+  const ring = circlePts(rr, 20);
+  const rose = tube(ring.pts, ring.nrm, rr * 0.16, depth * 0.4, true, rnd, 0, () => 2);
+  xf(rose.g, { ty: apex - rr * 1.6 });
+  P.addParts(rose.g, rose.parts);
+  for (let k = 0; k < 6; k++) {
+    P.add(xf(box(rr * 2, 0.5, 0.3), { rz: (k / 6) * Math.PI, ty: apex - rr * 1.6 }), 2);
+  }
+  return P.finalize({ aoParts: [], crease: 0.6 });
+}
+
+/** Prismatic halo: two interlocking rainbow rings around a glowing core. */
+export function haloProto(radius, thickness, rnd) {
+  const P = new Proto();
+  const mk = (r, th, rot) => {
+    const c = circlePts(r, 28);
+    const t = tube(c.pts, c.nrm, th, th * 0.7, true, rnd, 0, (i) => i % 3);
+    xf(t.g, { ry: rot });
+    P.addParts(t.g, t.parts);
+  };
+  mk(radius, thickness, 0);
+  mk(radius * 0.7, thickness * 0.75, Math.PI / 2);
+  P.add(ico(radius * 0.11, 1, 0.04, rnd), 2);
+  return P.finalize({ aoParts: [], crease: 0.6 });
+}
+
 // ------------------------------------------------------------ library
 
 export const PROP = {
@@ -784,6 +1094,14 @@ export const PROP = {
   LIGHTHOUSE: 21,
   BALLOON: 22,
   MONOLITH: 23,
+  GOTHIC_SPIRE: 24,
+  GRAVESTONE: 25,
+  LANTERN: 26,
+  CATHEDRAL: 27,
+  OBELISK: 28,
+  POLYHEDRON: 29,
+  ORB: 30,
+  PRISM_SHARD: 31,
 };
 
 const MAKERS = [
@@ -811,6 +1129,14 @@ const MAKERS = [
   [lighthouse, 1],
   [balloon, 1],
   [stoneSlab, 3],
+  [gothicSpire, 3],
+  [gravestone, 4],
+  [lantern, 2],
+  [cathedralRuin, 3],
+  [obelisk, 3],
+  [polyhedron, 6],
+  [floatingOrb, 2],
+  [prismShard, 3],
 ];
 
 /** Build every prototype variant from a fixed seed (identical in every worker). */

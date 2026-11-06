@@ -1,19 +1,21 @@
 // Web worker: generates chunk geometry off the main thread.
-import { createWorld } from './terrain.js';
+// Each request carries the 3x3 epoch neighbourhood decided by the main thread's
+// WorldMemory, so every worker builds exactly the same world.
 import { buildChunk } from './chunkBuilder.js';
+import { makeGenerationCache } from './world.js';
 
-let world = null;
+let getGen = null;
 
 self.onmessage = (e) => {
   const msg = e.data;
   if (msg.type === 'init') {
-    world = createWorld(msg.seed);
+    getGen = makeGenerationCache(msg.seed, 10);
     return;
   }
   if (msg.type === 'gen') {
-    if (!world) world = createWorld(msg.seed ?? 1);
+    if (!getGen) getGen = makeGenerationCache(msg.seed ?? 1, 10);
     try {
-      const out = buildChunk(world, msg.cx, msg.cz, msg.lod, msg.density);
+      const out = buildChunk(getGen, msg.epochs, msg.cx, msg.cz, msg.lod, msg.density);
       const { transfer, ...data } = out;
       self.postMessage({ type: 'chunk', id: msg.id, key: msg.key, ...data }, transfer);
     } catch (err) {

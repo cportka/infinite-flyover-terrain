@@ -1,16 +1,20 @@
 import * as THREE from 'three';
 import './ui/style.css';
-import { createWorld } from './world/terrain.js';
-import { BIOMES } from './world/biomes.js';
+import { BIOMES, BIOME } from './world/biomes.js';
+import { createWorldView } from './world/world.js';
 import { ChunkManager, QUALITY } from './world/chunkManager.js';
 import { MESA_STRATA } from './world/chunkBuilder.js';
+import { epochCell } from './world/blend.js';
+import { MATTER } from './world/matter.js';
+import { hex } from './world/biomes.js';
 import { createSharedUniforms, createTerrainMaterial, createPropMaterial, createWaterMaterial } from './render/materials.js';
 import { createSky } from './render/sky.js';
 import { Atmosphere } from './render/atmosphere.js';
 import { PostFX } from './render/postfx.js';
-import { Particles, Clouds, Birds } from './render/ambient.js';
-import { Player } from './game/player.js';
+import { Particles, Clouds, Birds, NeonShapes } from './render/ambient.js';
+import { Flyer } from './game/player.js';
 import { Rings } from './game/rings.js';
+import { Explosions } from './game/explosions.js';
 import { Input } from './game/input.js';
 import { AudioEngine } from './game/audio.js';
 import { HUD } from './ui/hud.js';
@@ -18,7 +22,7 @@ import { HUD } from './ui/hud.js';
 const REBASE_STEP = 4096; // every world-space shader pattern is periodic over this
 const REBASE_TRIGGER = 3072;
 const TIME_WRAP = 4096;
-const START_S = 300;
+const IDLE_MS = 5000;
 
 // ------------------------------------------------------------------ settings & params
 
@@ -51,6 +55,7 @@ const settings = {
   quality: params.get('quality') || store.get('quality', 'auto'),
   camera: params.get('cam') || store.get('camera', 'chase'),
   daySpeed: store.get('daySpeed', 1),
+  dream: params.get('dream') || store.get('dream', 'auto'),
   volume: store.get('volume', 0.8),
   muted: store.get('muted', false),
   invertY: store.get('invertY', false),
@@ -70,13 +75,7 @@ hud.setBest(store.get('best', 0));
 
 let renderer;
 try {
-  renderer = new THREE.WebGLRenderer({
-    canvas: document.getElementById('scene'),
-    antialias: false,
-    powerPreference: 'high-performance',
-    stencil: false,
-    depth: true,
-  });
+  renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('scene'), antialias: false, powerPreference: 'high-performance', stencil: false, depth: true });
 } catch (err) {
   console.error(err);
   hud.showError();
@@ -96,7 +95,6 @@ renderer.setSize(window.innerWidth, window.innerHeight, false);
 
 const scene = new THREE.Scene();
 const worldRoot = new THREE.Group();
-worldRoot.matrixAutoUpdate = true;
 scene.add(worldRoot);
 const origin = { x: 0, z: 0 };
 
@@ -113,13 +111,18 @@ const materials = {
 const sky = createSky(shared);
 scene.add(sky);
 
-const world = createWorld(SEED);
+const world = createWorldView(SEED, { memorySeconds: 40 });
+// debug: ?border places a boundary between two generations right at the start
+if (params.has('border')) world.memory.assignHook = (ix) => (ix >= 0 ? 1 : 0);
 const chunks = new ChunkManager({ root: worldRoot, seed: SEED, world, materials, quality: qualityName });
 
 const startT = parseFloat(params.get('t'));
 const atmosphere = new Atmosphere(shared, sky, { startTime: Number.isFinite(startT) ? startT : 0.665 });
 atmosphere.viewRadius = chunks.viewRadius;
 atmosphere.speed = settings.daySpeed;
+atmosphere.dreamMode = settings.dream;
+if (settings.dream === 'dream') atmosphere.dream = 1;
+if (settings.dream === 'real') atmosphere.dream = 0;
 
 const air = new Particles({ count: 1800, box: [256, 128, 256], additive: false, seed: 3 });
 const glow = new Particles({ count: 900, box: [256, 96, 256], additive: true, seed: 5 });
@@ -129,16 +132,22 @@ const clouds = new Clouds(shared);
 scene.add(clouds.mesh);
 const birds = new Birds(shared);
 scene.add(birds.mesh);
+const neon = new NeonShapes(shared);
+scene.add(neon.group);
 
-const player = new Player(world, materials.props);
-worldRoot.add(player.group);
-for (const t of player.trails) worldRoot.add(t.mesh);
-const startS = parseFloat(params.get('s'));
-player.reset(Number.isFinite(startS) ? startS : START_S);
-player.cameraMode = 'cinematic';
+const flyer = new Flyer(world, chunks, materials.props);
+worldRoot.add(flyer.group);
+for (const t of flyer.trails) worldRoot.add(t.mesh);
+flyer.preferredCamera = settings.camera;
+{
+  const biomeKey = params.get('biome');
+  const bi = biomeKey ? BIOMES.findIndex((b) => b.key === biomeKey) : -1;
+  const sp = (bi >= 0 && world.findBiome(bi)) || world.startPoint();
+  flyer.reset(sp.x, sp.z, sp.tx, sp.tz);
+}
 
 const rings = new Rings(worldRoot, world, shared, SEED);
-rings.reset(player.s);
+const explosions = new Explosions(worldRoot, shared);
 
 const post = new PostFX(renderer, scene, camera, { bloom: qualityName !== 'low', msaa: qualityName === 'high' ? 4 : 0 });
 
@@ -147,22 +156,28 @@ input.invertY = settings.invertY;
 const audio = new AudioEngine();
 audio.volume = settings.volume;
 audio.muted = settings.muted;
-hud.setSound(!settings.muted);
+hud.setSound(false);
 
-// ------------------------------------------------------------------ game state
+// ------------------------------------------------------------------ state
 
 const game = {
-  mode: 'loading', // loading | title | play | zen
+  started: false,
   paused: false,
+  gameMode: false,
   score: 0,
   combo: 1,
   best: store.get('best', 0),
-  region: null,
-  photo: false,
-  loadTime: 0,
+  crashes: 0,
+  regionKey: null,
+  borderShown: -1e9,
   time: 0,
+  loadTime: 0,
+  timeScale: 1,
   autopilot: true,
-  hintTimer: 0,
+  dreamTrend: atmosphere.dreamTrend,
+  lastEpoch: 0,
+  cellKey: null,
+  visits: new Map(),
 };
 
 function applyQuality(name) {
@@ -190,109 +205,87 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 
-function startFlight(zen) {
+function startAudio() {
+  if (settings.muted) return;
   audio.start();
-  audio.setMuted(settings.muted);
-  game.mode = zen ? 'zen' : 'play';
-  game.score = 0;
-  game.combo = 1;
-  game.hintTimer = 0;
-  player.distance = 0;
-  player.boostEnergy = 1;
-  player.cameraMode = zen ? 'cinematic' : settings.camera;
-  input.enabled = !zen;
-  hud.showTitle(false);
-  hud.showHUD(true);
-  hud.setZen(zen);
-  document.body.classList.toggle('playing', !zen);
-  const r = currentRegion();
-  game.region = r.key;
-  hud.region(BIOMES[r.biome].name, BIOMES[r.biome].tagline);
-  audio.setBiome(BIOMES[r.biome].music);
+  audio.setMuted(false);
+  hud.setSound(true);
 }
 
-function toTitle() {
-  setPaused(false);
-  finishRun();
-  audio.suspend();
-  game.mode = 'title';
-  input.enabled = false;
-  player.cameraMode = 'cinematic';
-  hud.showHUD(false);
-  hud.showTitle(true);
-  hud.setZen(false);
-  document.body.classList.remove('playing');
+function setGameMode(on) {
+  game.gameMode = on;
+  flyer.setGameMode(on);
+  rings.setEnabled(on);
+  hud.setGameHUD(on);
+  if (on) {
+    game.score = 0;
+    game.combo = 1;
+    hud.whisper(isTouch ? 'drag to steer · hold boost to fly faster' : 'steer with WASD or drag · space to boost', 4.5);
+  }
+}
+
+function setPaused(p) {
+  if (!game.started) p = false;
+  game.paused = p;
+  hud.showPause(p);
+  if (p) audio.suspend();
+  else if (!settings.muted) audio.resume();
 }
 
 function finishRun() {
-  if (game.mode === 'play' && game.score > game.best) {
+  if (game.gameMode && game.score > game.best) {
     game.best = Math.round(game.score);
     store.set('best', game.best);
     hud.setBest(game.best);
   }
 }
 
-function setPaused(p) {
-  if (game.mode !== 'play' && game.mode !== 'zen') p = false;
-  game.paused = p;
-  hud.showPause(p);
-  document.body.classList.toggle('paused', p);
-  if (p) audio.suspend();
-  else if (game.mode === 'play' || game.mode === 'zen') audio.resume();
-}
-
-function currentRegion() {
-  const b = world.biomeAt(player.pos.x, player.pos.z);
-  const second = b.t > 0.5;
-  return { key: second ? b.region + 1 : b.region, biome: second ? b.b : b.a };
-}
-
 // ------------------------------------------------------------------ UI wiring
 
 const $ = (id) => document.getElementById(id);
-$('btn-play').addEventListener('click', () => startFlight(false));
-$('btn-zen').addEventListener('click', () => startFlight(true));
-$('btn-zen-exit').addEventListener('click', () => toTitle());
-$('btn-pause').addEventListener('click', () => setPaused(!game.paused));
+$('btn-game').addEventListener('click', () => {
+  startAudio();
+  setGameMode(!game.gameMode);
+});
+$('btn-menu').addEventListener('click', () => setPaused(!game.paused));
 $('btn-resume').addEventListener('click', () => setPaused(false));
-$('btn-menu').addEventListener('click', () => toTitle());
 $('btn-newworld').addEventListener('click', () => {
   finishRun();
-  const s = 1 + Math.floor(Math.random() * 999999);
   const q = new URLSearchParams(location.search);
-  q.set('seed', String(s));
+  q.set('seed', String(1 + Math.floor(Math.random() * 999999)));
   location.search = q.toString();
 });
 $('btn-sound').addEventListener('click', () => toggleMute());
 
 function toggleMute() {
+  if (!audio.ctx && !settings.muted) {
+    startAudio();
+    return;
+  }
   settings.muted = !settings.muted;
   store.set('muted', settings.muted);
+  if (!settings.muted) audio.start();
   audio.setMuted(settings.muted);
   hud.setSound(!settings.muted);
 }
 
-const optQuality = $('opt-quality');
-optQuality.value = settings.quality;
-optQuality.addEventListener('change', () => {
-  settings.quality = optQuality.value;
-  store.set('quality', settings.quality);
-  applyQuality(settings.quality);
+const bindSelect = (id, key, apply) => {
+  const el = $(id);
+  el.value = String(settings[key]);
+  el.addEventListener('change', () => {
+    settings[key] = el.type === 'range' ? parseFloat(el.value) : el.value;
+    store.set(key, settings[key]);
+    apply(settings[key]);
+  });
+  return el;
+};
+bindSelect('opt-quality', 'quality', applyQuality);
+const optCamera = bindSelect('opt-camera', 'camera', (v) => {
+  flyer.preferredCamera = v;
+  if (game.gameMode) flyer.cameraMode = v;
 });
-const optCamera = $('opt-camera');
-optCamera.value = settings.camera;
-optCamera.addEventListener('change', () => {
-  settings.camera = optCamera.value;
-  store.set('camera', settings.camera);
-  if (game.mode === 'play') player.cameraMode = settings.camera;
-});
-const optTime = $('opt-time');
-optTime.value = String(settings.daySpeed);
-optTime.addEventListener('change', () => {
-  settings.daySpeed = parseFloat(optTime.value);
-  store.set('daySpeed', settings.daySpeed);
-  atmosphere.speed = settings.daySpeed;
-});
+bindSelect('opt-time', 'daySpeed', (v) => (atmosphere.speed = parseFloat(v)));
+const optDream = bindSelect('opt-dream', 'dream', (v) => (atmosphere.dreamMode = v));
 const optVolume = $('opt-volume');
 optVolume.value = String(settings.volume);
 optVolume.addEventListener('input', () => {
@@ -323,37 +316,46 @@ boostBtn.addEventListener('pointerup', boostUp);
 boostBtn.addEventListener('pointercancel', boostUp);
 boostBtn.addEventListener('pointerleave', boostUp);
 
+// the first touch, click or key wakes the sound
+const wake = () => {
+  if (!game.started) return;
+  startAudio();
+  hud.hideSoundHint();
+};
+window.addEventListener('pointerdown', wake);
+window.addEventListener('keydown', wake);
+
 const CAMERAS = ['chase', 'cinematic', 'cockpit'];
+const DREAMS = ['auto', 'dream', 'real'];
+const DREAM_WORDS = { auto: 'the world drifts between dreaming and waking', dream: 'the world dreams', real: 'the world stays awake' };
 input.on('key', (code) => {
-  if (game.mode === 'title') {
-    if (code === 'Enter' || code === 'Space') startFlight(false);
-    if (code === 'KeyZ') startFlight(true);
-    return;
-  }
-  if (game.mode !== 'play' && game.mode !== 'zen') return;
+  if (!game.started) return;
   if (code === 'KeyP' || code === 'Escape') setPaused(!game.paused);
   else if (code === 'KeyM') toggleMute();
-  else if (code === 'KeyH') {
-    game.photo = !game.photo;
-    hud.setPhoto(game.photo);
-  } else if (code === 'KeyC' && game.mode === 'play') {
-    const i = (CAMERAS.indexOf(player.cameraMode) + 1) % CAMERAS.length;
-    player.cameraMode = CAMERAS[i];
-    settings.camera = player.cameraMode;
+  else if (code === 'KeyG') setGameMode(!game.gameMode);
+  else if (code === 'KeyH') document.body.classList.toggle('photo');
+  else if (code === 'KeyC' && game.gameMode) {
+    const i = (CAMERAS.indexOf(flyer.cameraMode) + 1) % CAMERAS.length;
+    flyer.cameraMode = CAMERAS[i];
+    flyer.preferredCamera = CAMERAS[i];
+    settings.camera = CAMERAS[i];
     optCamera.value = settings.camera;
     store.set('camera', settings.camera);
   } else if (code === 'KeyT') {
     atmosphere.t = (atmosphere.t + 0.04) % 1;
+  } else if (code === 'KeyR') {
+    const m = DREAMS[(DREAMS.indexOf(atmosphere.dreamMode) + 1) % DREAMS.length];
+    atmosphere.dreamMode = m;
+    settings.dream = m;
+    optDream.value = m;
+    store.set('dream', m);
+    hud.whisper(DREAM_WORDS[m], 3.5);
   }
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    if (game.mode === 'play') setPaused(true);
-    audio.suspend();
-  } else if (!game.paused && (game.mode === 'play' || game.mode === 'zen')) {
-    audio.resume();
-  }
+  if (document.hidden) audio.suspend();
+  else if (!game.paused && !settings.muted) audio.resume();
 });
 
 // ------------------------------------------------------------------ events
@@ -366,38 +368,50 @@ function screenPos(x, y, z) {
 
 const events = {
   onCollect(it, perfect) {
-    if (game.mode !== 'play') {
-      if (game.mode === 'zen') audio.collect(Math.min(9, game.combo++), it.golden);
-      return;
-    }
+    if (!game.gameMode) return;
     const base = it.golden ? 500 : 100;
     const pts = Math.round(base * game.combo * (perfect ? 1.5 : 1));
     game.score += pts;
     audio.collect(game.combo, it.golden);
     game.combo = Math.min(game.combo + 1, 25);
-    player.boostEnergy = Math.min(1, player.boostEnergy + (it.golden ? 0.4 : 0.14));
-    const p = screenPos(it.x, it.y, it.z);
+    flyer.boostEnergy = Math.min(1, flyer.boostEnergy + (it.golden ? 0.4 : 0.14));
+    const p = screenPos(it.pos.x, it.pos.y, it.pos.z);
     if (p.visible) hud.popup(p.x, p.y, `+${pts}${perfect ? '  perfect' : ''}`, it.golden ? 'gold' : '');
     post.final.uniforms.uFlash.value = it.golden ? 0.25 : 0.08;
   },
   onMiss(it) {
-    if (game.mode === 'zen') game.combo = 1;
-    if (game.mode !== 'play') return;
+    if (!game.gameMode) return;
     if (game.combo > 1) {
-      const p = screenPos(it.x, it.y, it.z);
+      const p = screenPos(it.pos.x, it.pos.y, it.pos.z);
       if (p.visible) hud.popup(p.x, p.y, 'combo lost', 'miss');
       audio.miss();
     }
     game.combo = 1;
   },
-  onBump() {
-    if (game.mode !== 'play') return;
+  onHit(mat, damage, pos) {
+    if (damage < 3) return;
     game.combo = 1;
-    audio.bump();
+    explosions.spawnHit(mat, pos, flyer.vel, Math.min(2, damage / 30));
+    audio.hit(MATTER[mat].style, damage);
+    const p = screenPos(pos.x, pos.y + 3, pos.z);
+    if (p.visible && damage >= 8) hud.popup(p.x, p.y, `hull −${Math.round(damage)}`, 'hurt');
+  },
+  onDeath(mat, pos, vel, mesh) {
+    game.crashes++;
+    explosions.spawn(mat, pos, vel, mesh);
+    audio.explosion(MATTER[mat].style);
+    finishRun();
+    hud.eulogy(MATTER[mat].line, `flight ${game.crashes} · ${Math.round(game.score).toLocaleString()} points`);
+    game.timeScale = 0.25;
+    post.final.uniforms.uFlash.value = 0.35;
+    game.combo = 1;
+  },
+  onRespawn() {
+    game.score = 0;
   },
 };
 
-// ------------------------------------------------------------------ particles presets
+// ------------------------------------------------------------------ ambient presets
 
 function mixPreset(A, B, t, out) {
   const l = (a, b) => a + (b - a) * t;
@@ -412,9 +426,14 @@ function mixPreset(A, B, t, out) {
   out.night = l(A.night ?? 1, B.night ?? 1);
   return out;
 }
+const BORDER_AIR = { color: hex(0x2a2430), color2: hex(0x4a4058), size: 0.3, amount: 1.0, fall: -0.4, swirl: 2.5, shape: 0 };
+const BORDER_GLOW = { color: hex(0xa04aff), color2: hex(0xff4ad8), size: 0.45, amount: 0.9, night: 0.2, rise: 1.4 };
 const airP = {};
 const glowP = {};
+const airB = {};
+const glowB = {};
 const lightCol = new THREE.Color();
+const S = {};
 
 // ------------------------------------------------------------------ main loop
 
@@ -426,7 +445,7 @@ const debug = params.has('debug');
 
 function updateAdaptiveResolution(dtMs) {
   frameAvg += (dtMs - frameAvg) * 0.05;
-  if (game.mode === 'loading') return;
+  if (!game.started) return;
   if (frameAvg > 24) {
     slowTime += dtMs;
     fastTime = 0;
@@ -448,6 +467,26 @@ function updateAdaptiveResolution(dtMs) {
   }
 }
 
+function memoryWhispers() {
+  for (const e of world.memory.drainEvents()) {
+    if (e.type === 'epoch' && game.started) hud.whisper('beyond memory, the land is made anew', 5.5);
+  }
+  // returning to remembered ground
+  const ix = epochCell(camera.position.x);
+  const iz = epochCell(camera.position.z);
+  const key = `${ix},${iz}`;
+  if (key !== game.cellKey) {
+    const lastVisit = game.visits.get(key);
+    const age = world.memory.ageOf(ix, iz);
+    if (lastVisit !== undefined && game.time - lastVisit > 25 && age !== undefined && age > 35) {
+      hud.whisper('you remember this place', 4.5);
+    }
+    if (game.cellKey) game.visits.set(game.cellKey, game.time);
+    game.cellKey = key;
+    if (game.visits.size > 400) game.visits.delete(game.visits.keys().next().value);
+  }
+}
+
 function frame(now) {
   requestAnimationFrame(frame);
   const rawMs = now - last;
@@ -456,35 +495,38 @@ function frame(now) {
   updateAdaptiveResolution(Math.min(rawMs, 100));
   let dt = Math.min(rawMs / 1000, 1 / 20);
   if (game.paused) dt = 0;
-  game.time += dt;
+  game.timeScale += (1 - game.timeScale) * Math.min(1, dt * 0.9);
+  const gdt = dt * game.timeScale;
+  game.time += gdt;
   shared.uTime.value = game.time % TIME_WRAP;
 
   // ---- flight
+  input.enabled = game.started && !game.paused;
   input.update();
-  let steer = { x: 0, y: 0 };
-  let boost = false;
-  let next = null;
-  if (game.mode !== 'loading') next = rings.update(dt, player, events);
-  const flying = game.mode !== 'loading';
-  if (flying && dt > 0) {
-    const human = game.mode === 'play' && input.activeWithin(6000);
+  if (game.started) {
+    rings.update(gdt, flyer, events);
+    const human = input.activeWithin(IDLE_MS);
     game.autopilot = !human;
-    if (human) {
-      steer = input.steer;
+    let control;
+    let boost = false;
+    if (human && flyer.alive) {
+      control = input.steer;
       boost = input.boost;
     } else {
-      steer = player.autopilot(game.mode === 'play' ? null : next, dt);
+      control = flyer.autopilot(gdt, game.time);
     }
-    const wasBoost = player.boosting;
-    player.update(dt, steer, boost, events);
-    if (player.boosting && !wasBoost) audio.whoosh();
+    if (gdt > 0) {
+      const wasBoost = flyer.boosting;
+      flyer.update(gdt, control, boost, events, game.time);
+      if (flyer.boosting && !wasBoost) audio.whoosh();
+    }
   }
 
   // ---- camera + floating origin
-  player.updateCamera(camera, dt, game.time);
+  flyer.updateCamera(camera, gdt, game.time);
   const portrait = camera.aspect < 1;
-  const baseFov = portrait ? 74 : 62;
-  const targetFov = baseFov + (player.boosting ? 10 : 0) + (player.speed - 68) * 0.04;
+  const baseFov = (portrait ? 74 : 62) + (flyer.cameraMode === 'drone' ? 4 : 0);
+  const targetFov = baseFov + (flyer.boosting ? 10 : 0) + Math.max(0, flyer.speed - 66) * 0.04;
   camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 3 || 0.1);
   camera.updateProjectionMatrix();
 
@@ -496,81 +538,104 @@ function frame(now) {
   worldRoot.updateMatrixWorld(true);
   sky.position.set(camera.position.x - origin.x, camera.position.y, camera.position.z - origin.z);
 
-  // ---- world streaming
-  chunks.update(camera.position.x, camera.position.z, game.mode === 'loading' ? 12 : 4);
+  // ---- world streaming (full disk, biased along the heading)
+  chunks.update(camera.position.x, camera.position.z, Math.sin(flyer.yaw), -Math.cos(flyer.yaw), game.time, game.started ? 4 : 12);
 
-  // ---- atmosphere (biome at the camera drives tints, particles, music)
-  const bb = world.biomeAt(camera.position.x, camera.position.z);
-  atmosphere.setBiomeBlend(bb.a, bb.b, bb.t);
-  atmosphere.update(game.mode === 'loading' ? 0 : dt);
+  // ---- atmosphere: biome + borderland at the camera
+  world.sample(camera.position.x, camera.position.z, S);
+  atmosphere.setBiomeBlend(S.a, S.b, S.t, S.bl);
+  atmosphere.update(game.started ? gdt : 0);
   const st = atmosphere.state;
   birds.material.uniforms.uDay.value = Math.max(0, Math.min(1, 1 - st.night * 1.6));
 
-  const A = BIOMES[bb.a];
-  const B = BIOMES[bb.b];
-  mixPreset(A.air, B.air, bb.t, airP);
-  mixPreset(A.glow, B.glow, bb.t, glowP);
+  const A = BIOMES[S.a];
+  const B = BIOMES[S.b];
+  mixPreset(A.air, B.air, S.t, airP);
+  mixPreset(A.glow, B.glow, S.t, glowP);
+  if (S.bl > 0.01) {
+    mixPreset(airP, BORDER_AIR, S.bl, airB);
+    mixPreset(glowP, BORDER_GLOW, S.bl, glowB);
+    Object.assign(airP, airB);
+    Object.assign(glowP, glowB);
+  }
   const pixel = (renderer.domElement.height * 0.5) / Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
   lightCol.copy(shared.uSunColor.value).multiplyScalar(0.35).add(shared.uAmbSky.value).multiplyScalar(1.1);
   air.apply(airP, lightCol, 0.85, shared.uTime.value, pixel);
   const glowAmount = glowP.amount * (glowP.night >= 0.99 ? st.night : 1 - glowP.night + glowP.night * st.night);
-  lightCol.setRGB(1.7, 1.7, 1.7);
-  glow.apply({ ...glowP, amount: Math.min(1, glowAmount) }, lightCol, 1.0, shared.uTime.value, pixel, 1);
+  lightCol.setRGB(1.7, 1.7, 1.7).multiplyScalar(1 + st.dream * 0.6);
+  glow.apply({ ...glowP, amount: Math.min(1, glowAmount + st.dream * 0.25) }, lightCol, 1.0, shared.uTime.value, pixel, 1);
   rings.pixel = pixel;
+  explosions.pixel = pixel;
+  explosions.update(gdt, origin);
 
-  // ---- regions
-  if (game.mode === 'play' || game.mode === 'zen') {
-    const r = currentRegion();
-    if (r.key !== game.region) {
-      game.region = r.key;
-      hud.region(BIOMES[r.biome].name, BIOMES[r.biome].tagline);
-      audio.setBiome(BIOMES[r.biome].music);
-      audio.regionSwell();
+  // ---- regions, borderlands, memory, dreams
+  if (game.started) {
+    const dom = S.t > 0.5 ? S.b : S.a;
+    if (S.bl > 0.45) {
+      if (game.time - game.borderShown > 40) {
+        game.borderShown = game.time;
+        hud.region('The Borderland', 'where memory frays into another world', 'border');
+      }
+      game.regionKey = null;
+    } else {
+      const key = `${S.e0}:${S.region}`;
+      if (key !== game.regionKey && S.bl < 0.2) {
+        game.regionKey = key;
+        hud.region(BIOMES[dom].name, BIOMES[dom].tagline);
+        audio.setBiome(BIOMES[dom].music);
+        audio.regionSwell();
+      }
     }
-    audio.update({ speed: player.speed, boosting: player.boosting });
+    memoryWhispers();
+    const trend = atmosphere.dreamTrend;
+    if (trend !== game.dreamTrend && atmosphere.dreamMode === 'auto') {
+      if (trend === 'rising') hud.whisper('the colours begin to dream…', 5);
+      if (trend === 'falling') hud.whisper('…and slowly, the world wakes', 5);
+      game.dreamTrend = trend;
+    }
+    audio.update({ speed: flyer.speed, boosting: flyer.boosting });
+    audio.setAmbience(S.bl, st.dream);
     hud.update(dt, {
+      game: game.gameMode,
       score: game.score,
       combo: game.combo,
-      distance: player.distance,
+      distance: flyer.distance,
       clock: atmosphere.clock(),
-      night: st.night,
-      boost: player.boostEnergy,
-      boosting: player.boosting,
-      autopilot: game.mode === 'play' && game.autopilot,
+      boost: flyer.boostEnergy,
+      boosting: flyer.boosting,
+      health: flyer.health,
+      autopilot: game.gameMode && game.autopilot && flyer.alive,
     });
   }
 
-  // ---- loading -> title
-  if (game.mode === 'loading') {
+  // ---- loading
+  if (!game.started) {
     game.loadTime += rawMs / 1000;
     const p = chunks.progress();
     hud.setLoading(p);
     if ((p >= 0.98 && game.loadTime > 0.6) || game.loadTime > 12) {
+      game.started = true;
       hud.hideLoading();
-      if (params.has('play')) {
-        game.mode = 'title';
-        startFlight(false);
-      } else if (params.has('zen')) {
-        game.mode = 'title';
-        startFlight(true);
-      } else {
-        toTitle();
-      }
+      hud.titleCard(params.has('notitle') ? 0 : 6500);
+      if (params.has('game') || params.has('play')) setGameMode(true);
     }
   }
 
   // ---- post
   const f = post.final.uniforms;
   f.uExposure.value = st.exposure;
-  // bloom runs before exposure: keep sun-lit whites out of it by day, let emissives glow at night
-  post.bloom.threshold = 2.6 + (1.15 - 2.6) * st.night;
-  f.uAberration.value = player.boosting ? 0.0045 : 0.0012;
+  f.uDream.value = st.dream;
+  f.uAberration.value = flyer.boosting ? 0.0045 : 0.0008 + st.dream * 0.0022;
   f.uFlash.value = Math.max(0, f.uFlash.value - dt * 0.8);
+  // the dream blooms hardest at night; by day it must not wash the land out
+  const dreamBloom = st.dream * (0.35 + 0.65 * st.night);
+  post.bloom.threshold = 2.6 + (1.15 - 2.6) * Math.max(st.night, dreamBloom * 0.7);
+  post.bloom.strength = 0.42 + 0.45 * dreamBloom;
   post.render(dt);
 
   if (debug && Math.floor(now / 1000) !== Math.floor((now - rawMs) / 1000)) {
     console.log(
-      `[debug] fps ${(1000 / frameAvg).toFixed(0)} res ${resScale.toFixed(2)} chunks ${chunks.stats.chunks} pending ${chunks.stats.pending} calls ${renderer.info.render.calls} tris ${renderer.info.render.triangles} t ${atmosphere.t.toFixed(3)} s ${player.s.toFixed(0)}`,
+      `[debug] fps ${(1000 / frameAvg).toFixed(0)} res ${resScale.toFixed(2)} chunks ${chunks.stats.chunks} pending ${chunks.stats.pending} calls ${renderer.info.render.calls} tris ${renderer.info.render.triangles} t ${atmosphere.t.toFixed(3)} dream ${st.dream.toFixed(2)} bl ${S.bl.toFixed(2)} epoch ${world.memory.epoch} pos ${flyer.pos.x.toFixed(0)},${flyer.pos.z.toFixed(0)} y ${flyer.pos.y.toFixed(0)}`,
     );
   }
 }
@@ -581,4 +646,4 @@ requestAnimationFrame((t) => {
 });
 
 // expose a tiny handle for debugging in the console
-window.__flyover = { world, chunks, player, rings, atmosphere, game, renderer, QUALITY };
+window.__flyover = { world, chunks, flyer, rings, explosions, atmosphere, game, renderer, camera, scene, post, setGameMode, events, QUALITY, BIOME };

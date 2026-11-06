@@ -1,125 +1,88 @@
-// The procedural world: flight path, biome regions and the terrain height field.
-// Pure JS so it can run identically in the chunk worker and on the main thread
-// (the main thread uses it for collisions, ring placement and the autopilot).
+// A "generation" is one complete, deterministic, infinite 2D world for a seed:
+// Voronoi biome regions, a meandering river network carved into valleys, and
+// the terrain height field. The live world is a patchwork of generations
+// (see blend.js / memory.js), which is how the world forgets and renews itself.
+// Pure JS: runs identically in the chunk workers and on the main thread.
 
-import { createSimplex2D, mulberry32, hashInt, clamp, lerp, smoothstep, smin } from './noise.js';
-import { BIOMES, BIOME_COUNT, FIRST_CYCLE } from './biomes.js';
+import { createSimplex2D, mulberry32, hashInt, hash01, clamp, lerp, smoothstep, smin } from './noise.js';
+import { BIOMES, BIOME_COUNT } from './biomes.js';
 
 export const CHUNK_SIZE = 256;
 export const WATER_LEVEL = 0;
-export const REGION_LENGTH = 3200; // metres of journey per biome region
-const TRANSITION = 0.2; // fraction of a region used to blend into the next one
+export const REGION_SIZE = 2600; // spacing of biome region sites (m)
+const REGION_BLEND = 560; // d2 - d1 range over which neighbouring regions blend
+const RIVER_FREQ = 1 / 2300; // river network spacing (zero-set of a low-frequency field)
+export const LANDMARK_CELL = 1000;
 
-// Flight-path shape (lateral meander as a function of forward distance s).
-const PATH_A1 = 300;
-const PATH_F1 = 0.00024;
-const PATH_A2 = 85;
-const PATH_F2 = 0.00085;
-
-export function createWorld(seed = 1) {
+export function createGeneration(seed = 1, { startBiome = null } = {}) {
   seed = seed >>> 0;
   const nA = createSimplex2D(mulberry32(seed ^ 0x9e3779b9));
   const nB = createSimplex2D(mulberry32((seed * 7 + 13) ^ 0x85ebca6b));
   const nC = createSimplex2D(mulberry32((seed * 31 + 101) ^ 0xc2b2ae35));
+  const nR = createSimplex2D(mulberry32((seed * 131 + 7) ^ 0x27d4eb2d));
 
-  // ---------------------------------------------------------------- path
-  function pathX(s) {
-    return PATH_A1 * nA(s * PATH_F1, 0.5) + PATH_A2 * nA(s * PATH_F2, 9.5);
-  }
-  function pathSlope(s) {
-    return (pathX(s + 2) - pathX(s - 2)) * 0.25;
-  }
-
-  // Per-s memo: rows of a chunk share the same z, so this hits constantly.
-  let memoS = NaN;
-  const memo = { x: 0, invLen: 1, widthN: 0, floorN: 0, riverOff: 0, riverW: 0 };
-  function pathInfo(s) {
-    if (s !== memoS) {
-      memoS = s;
-      const slope = pathSlope(s);
-      memo.x = pathX(s);
-      memo.invLen = 1 / Math.sqrt(1 + slope * slope);
-      memo.widthN = nC(s * 0.0007, 40.5);
-      memo.floorN = nC(s * 0.00045, 77.7);
-      memo.riverOff = nC(s * 0.0032, 13.3);
-      memo.riverW = nC(s * 0.0011, 91.1);
-    }
-    return memo;
-  }
-
-  /** Path frame at distance s: position (y = 0), unit tangent and right vectors. */
-  function pathFrame(s, out = {}) {
-    const slope = pathSlope(s);
-    const inv = 1 / Math.sqrt(1 + slope * slope);
-    out.x = pathX(s);
-    out.z = -s;
-    out.tx = slope * inv; // tangent points towards -z (forward)
-    out.tz = -inv;
-    out.rx = inv; // right = (-tz, 0, tx)
-    out.rz = slope * inv;
-    return out;
-  }
-
-  // ------------------------------------------------------------- regions
-  const permCache = new Map();
-  function rawPerm(c) {
-    if (c === 0) return FIRST_CYCLE.slice();
-    const r = mulberry32(hashInt(c, seed, 0x5bd1e995));
-    const p = [];
-    for (let i = 0; i < BIOME_COUNT; i++) p.push(i);
-    for (let i = p.length - 1; i > 0; i--) {
-      const j = Math.floor(r() * (i + 1));
-      const t = p[i];
-      p[i] = p[j];
-      p[j] = t;
-    }
-    if (c === -1) {
-      // The journey starts near the region -1/0 boundary (warped), so make the
-      // region just behind the start share the opening biome.
-      const k = p.indexOf(FIRST_CYCLE[0]);
-      p.splice(k, 1);
-      p.push(FIRST_CYCLE[0]);
-    }
-    return p;
-  }
-  function cyclePerm(c) {
-    let p = permCache.get(c);
-    if (p) return p;
-    p = rawPerm(c);
-    if (c !== 0) {
-      // Never repeat a biome across a cycle boundary. Swapping the first two
-      // entries never changes the last one, so comparing raw perms is exact.
-      const prev = rawPerm(c - 1);
-      if (p[0] === prev[prev.length - 1]) {
-        const t = p[0];
-        p[0] = p[1];
-        p[1] = t;
+  // ------------------------------------------------------------ biome regions
+  const sites = new Map();
+  const rawPick = (ix, iz) => hashInt(ix, iz, seed, 0x51e) % BIOME_COUNT;
+  function site(ix, iz) {
+    const key = (ix + 32768) * 65536 + (iz + 32768);
+    let s = sites.get(key);
+    if (s) return s;
+    let x;
+    let z;
+    let biome;
+    if (startBiome !== null && ix === 0 && iz === 0) {
+      x = 0;
+      z = 0;
+      biome = startBiome;
+    } else {
+      x = (ix + (hash01(ix, iz, seed, 11) - 0.5) * 0.6) * REGION_SIZE;
+      z = (iz + (hash01(ix, iz, seed, 12) - 0.5) * 0.6) * REGION_SIZE;
+      biome = rawPick(ix, iz);
+      // avoid repeating the biome of the left / upper neighbours
+      for (let k = 0; k < 3 && (biome === rawPick(ix - 1, iz) || biome === rawPick(ix, iz - 1)); k++) {
+        biome = (biome + 1) % BIOME_COUNT;
       }
     }
-    permCache.set(c, p);
-    if (permCache.size > 64) permCache.delete(permCache.keys().next().value);
-    return p;
+    s = { x, z, biome, key };
+    sites.set(key, s);
+    if (sites.size > 4096) sites.delete(sites.keys().next().value);
+    return s;
   }
-  function regionBiome(i) {
-    const c = Math.floor(i / BIOME_COUNT);
-    return cyclePerm(c)[i - c * BIOME_COUNT];
-  }
-  function regionCoord(x, z) {
-    return -z / REGION_LENGTH + 0.3 * nB(x * 0.0004 + 50.0, z * 0.0004 - 20.0) + 0.08 * nC(x * 0.0013, z * 0.0013 + 80.0);
-  }
-  /** Biome blend at a point: out.a blends into out.b by out.t. */
-  function biomeAt(x, z, out = {}) {
-    const u = regionCoord(x, z);
-    const i = Math.floor(u);
-    const f = u - i;
-    out.region = i;
-    out.a = regionBiome(i);
-    out.b = regionBiome(i + 1);
-    out.t = smoothstep(1 - TRANSITION, 1, f);
+
+  /** Biome blend at a point: out.a blends into out.b by out.t (t <= 0.5, a dominates). */
+  function regionAt(x, z, out = {}) {
+    const wx = x + 0.17 * REGION_SIZE * nB(x * 0.00025 + 3.3, z * 0.00025 - 7.1);
+    const wz = z + 0.17 * REGION_SIZE * nB(x * 0.00025 - 9.9, z * 0.00025 + 1.7);
+    const cx = Math.round(wx / REGION_SIZE);
+    const cz = Math.round(wz / REGION_SIZE);
+    let d1 = Infinity;
+    let d2 = Infinity;
+    let s1 = null;
+    let s2 = null;
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const s = site(cx + dx, cz + dz);
+        const d = Math.hypot(wx - s.x, wz - s.z);
+        if (d < d1) {
+          d2 = d1;
+          s2 = s1;
+          d1 = d;
+          s1 = s;
+        } else if (d < d2) {
+          d2 = d;
+          s2 = s;
+        }
+      }
+    }
+    out.a = s1.biome;
+    out.b = s2.biome;
+    out.t = s1.biome === s2.biome ? 0 : 0.5 - 0.5 * smoothstep(0, REGION_BLEND, d2 - d1);
+    out.region = s1.key;
     return out;
   }
 
-  // ------------------------------------------------------------- terrain
+  // ------------------------------------------------------------ noise helpers
   function fbm(x, z, oct) {
     let sum = 0;
     let amp = 1;
@@ -153,6 +116,32 @@ export function createWorld(seed = 1) {
     return sum / norm;
   }
 
+  // ------------------------------------------------------------ rivers
+  // Rivers run along the zero-set of a warped low-frequency field r(x,z).
+  // Distance to the river ~ |r| / |grad r|.
+  function riverRaw(wx, wz) {
+    return nR(wx * RIVER_FREQ, wz * RIVER_FREQ) * 0.75 + nC(wx * RIVER_FREQ * 2.3 + 11.1, wz * RIVER_FREQ * 2.3 - 4.4) * 0.25;
+  }
+  const MIN_GRAD = RIVER_FREQ * 0.45;
+  function river(x, z, out = {}) {
+    const ox = 150 * nR(x * 0.0011 + 5.5, z * 0.0011 - 2.2);
+    const oz = 150 * nR(x * 0.0011 - 8.8, z * 0.0011 + 6.6);
+    const wx = x + ox;
+    const wz = z + oz;
+    const e = 3;
+    const r = riverRaw(wx, wz);
+    const gx = (riverRaw(wx + e, wz) - r) / e;
+    const gz = (riverRaw(wx, wz + e) - r) / e;
+    const g = Math.max(MIN_GRAD, Math.hypot(gx, gz));
+    out.r = r;
+    out.gx = gx;
+    out.gz = gz;
+    out.g = g;
+    out.d = Math.abs(r) / g;
+    return out;
+  }
+
+  // ------------------------------------------------------------ height field
   function biomeHeight(T, cont, hills, ridge, mmBase, detail) {
     const mm = smoothstep(-0.15, 0.5, mmBase + T.mtnBias);
     let h = T.base + T.contAmp * cont + T.hillAmp * hills + T.mtnAmp * Math.pow(ridge, T.ridgePow) * mm + T.detailAmp * detail;
@@ -165,12 +154,14 @@ export function createWorld(seed = 1) {
     return h;
   }
 
+  const RV = {};
   /**
    * Full terrain sample. Fills `out` with:
-   *   h, a, b, t (biome blend), region, detail, cont, ridge, d (distance to path), vw (valley half width)
+   *   h, a, b, t (biome blend), region, detail, cont, ridge,
+   *   d (distance to river), vw (valley half width), floor, rgx/rgz (river field gradient)
    */
   function sample(x, z, out = {}) {
-    biomeAt(x, z, out);
+    regionAt(x, z, out);
     const TA = BIOMES[out.a].terrain;
     const TB = BIOMES[out.b].terrain;
     const t = out.t;
@@ -186,19 +177,15 @@ export function createWorld(seed = 1) {
     let h = biomeHeight(TA, cont, hills, ridge, mmBase, detail);
     if (t > 0) h = lerp(h, biomeHeight(TB, cont, hills, ridge, mmBase, detail), t);
 
-    // Carve the flight valley along the path.
-    const s = -z;
-    const P = pathInfo(s);
-    const d = Math.abs(x - P.x) * P.invLen;
-    const vw = lerp(TA.valleyWidth, TB.valleyWidth, t) * (0.75 + 0.25 * (1 + P.widthN));
-    const vfloor = lerp(TA.valleyFloor, TB.valleyFloor, t) + lerp(TA.floorVar, TB.floorVar, t) * P.floorN;
+    // carve valleys around the river network
+    river(x, z, RV);
+    const d = RV.d;
+    const vw = lerp(TA.valleyWidth, TB.valleyWidth, t) * (0.75 + 0.25 * (1 + nC(x * 0.0007, z * 0.0007 + 40.5)));
+    const vfloor = lerp(TA.valleyFloor, TB.valleyFloor, t) + lerp(TA.floorVar, TB.floorVar, t) * nC(x * 0.00045 + 77.7, z * 0.00045);
     const wall = lerp(TA.valleyWall, TB.valleyWall, t);
     const e = Math.max(0, d - vw);
-    // a meandering river channel inside a raised floodplain
-    const rOff = P.riverOff * vw * 0.35;
-    const dr = Math.abs(x - P.x - rOff) * P.invLen;
-    const rw = 13 + 9 * (1 + P.riverW);
-    const chan = smoothstep(rw, rw * 0.3, dr);
+    const rw = 13 + 9 * (1 + nC(x * 0.0011 + 91.1, z * 0.0011));
+    const chan = smoothstep(rw, rw * 0.3, d);
     const floodplain = vfloor + 4.2 + 0.9 * detail;
     const bed = vfloor - 2.4 + 0.3 * detail;
     const valleyFloor = floodplain + (bed - floodplain) * chan;
@@ -212,32 +199,71 @@ export function createWorld(seed = 1) {
     out.d = d;
     out.vw = vw;
     out.floor = vfloor;
+    out.rgx = RV.gx;
+    out.rgz = RV.gz;
+    out.rr = RV.r;
     return out;
   }
 
-  const tmpSample = {};
+  const tmp = {};
   function heightAt(x, z) {
-    return sample(x, z, tmpSample).h;
+    return sample(x, z, tmp).h;
   }
 
-  /** Height of the ground or water surface along the path centre. */
-  function groundAlongPath(s) {
-    const x = pathX(s);
-    return Math.max(WATER_LEVEL, heightAt(x, -s));
+  // ------------------------------------------------------------ landmarks
+  // One candidate per LANDMARK_CELL; snapped onto the river when one is near,
+  // oriented across the valley (arches, gates) or free-standing otherwise.
+  const lmCache = new Map();
+  const LR = {};
+  function landmark(kx, kz) {
+    const key = (kx + 32768) * 65536 + (kz + 32768);
+    if (lmCache.has(key)) return lmCache.get(key);
+    const r = mulberry32(hashInt(kx, kz, seed, 0x1a2d));
+    let x = (kx + 0.2 + 0.6 * r()) * LANDMARK_CELL;
+    let z = (kz + 0.2 + 0.6 * r()) * LANDMARK_CELL;
+    const roll = r();
+    const seedL = hashInt(kx, kz, seed, 0x77);
+    river(x, z, LR);
+    let spec = null;
+    if (LR.d < 300) {
+      for (let i = 0; i < 3; i++) {
+        river(x, z, LR);
+        const g2 = LR.gx * LR.gx + LR.gz * LR.gz + 1e-12;
+        x -= (LR.r * LR.gx) / g2;
+        z -= (LR.r * LR.gz) / g2;
+      }
+      river(x, z, LR);
+      const g = Math.hypot(LR.gx, LR.gz) || 1;
+      if (LR.d < 25) {
+        spec = { x, z, river: true, ax: LR.gx / g, az: LR.gz / g, roll, seed: seedL };
+      }
+    }
+    if (!spec && roll < 0.45) spec = { x, z, river: false, ax: 1, az: 0, roll, seed: seedL };
+    lmCache.set(key, spec);
+    if (lmCache.size > 2048) lmCache.delete(lmCache.keys().next().value);
+    return spec;
   }
 
-  return {
-    seed,
-    nA,
-    nB,
-    nC,
-    pathX,
-    pathSlope,
-    pathFrame,
-    biomeAt,
-    regionBiome,
-    sample,
-    heightAt,
-    groundAlongPath,
-  };
+  /** Nearest point on a river, searched from (x, z); returns {x, z, tx, tz} or null. */
+  function nearestRiver(x, z) {
+    const o = {};
+    for (let i = 0; i < 8; i++) {
+      river(x, z, o);
+      const g2 = o.gx * o.gx + o.gz * o.gz + 1e-12;
+      const k = Math.min(1, 400 / Math.max(1e-6, Math.abs(o.r) / Math.sqrt(g2)));
+      x -= ((o.r * o.gx) / g2) * k;
+      z -= ((o.r * o.gz) / g2) * k;
+    }
+    river(x, z, o);
+    if (o.d > 40) return null;
+    const g = Math.hypot(o.gx, o.gz) || 1;
+    return { x, z, tx: -o.gz / g, tz: o.gx / g };
+  }
+
+  return { seed, nA, nB, nC, nR, regionAt, river, sample, heightAt, landmark, nearestRiver, site };
+}
+
+/** Seed of the generation for an epoch (epoch 0 is the shareable base world). */
+export function generationSeed(baseSeed, epoch) {
+  return epoch === 0 ? baseSeed >>> 0 : hashInt(baseSeed, epoch, 0xe90c) >>> 0;
 }
